@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_NAME = "kaji-app-v2";
+const CACHE_NAME = "kaji-app-v3";
 const APP_SHELL = [
   "./",
   "./index.html",

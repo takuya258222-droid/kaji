@@ -125,6 +125,9 @@ function shareOf(records) {
 
 /* ---------- API ---------- */
 function setSync(text) { document.getElementById("syncStatus").textContent = text; }
+function markSynced() {
+  setSync("同期済み " + new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }));
+}
 function showError(msg) {
   const bar = document.getElementById("errorBar");
   bar.textContent = msg;
@@ -133,36 +136,88 @@ function showError(msg) {
   showError._t = setTimeout(() => bar.classList.add("hidden"), 6000);
 }
 
-async function fetchState() {
-  if (!API_URL) { state.connected = false; setSync("未設定"); return false; }
+// サーバー状態の取得だけを行い、正規化したスナップショットを返す（ローカル状態は触らない）
+async function fetchServerState() {
+  if (!API_URL) { state.connected = false; return null; }
   try {
     const res = await fetch(API_URL + "?action=state&pin=" + encodeURIComponent(state.pin) + "&ts=" + Date.now());
     const j = await res.json();
     if (!j || !j.ok) {
       if (j && j.error === "unauthorized") {
         const pin = window.prompt("合言葉を入力してください");
-        if (pin) { state.pin = pin; localStorage.setItem("kaji_pin", pin); return fetchState(); }
+        if (pin) { state.pin = pin; localStorage.setItem("kaji_pin", pin); return fetchServerState(); }
       }
-      throw new Error(j && j.error ? j.error : "state_error");
+      return null;
     }
-    state.chores = j.chores || [];
-    state.records = j.records || [];
-    state.targets = (j.targets || []).map((t) => ({ scope: t.scope, key: normalizeTargetKey(t.scope, t.key), choreId: t.choreId }));
-    state.connected = true;
-    setSync("同期済み " + new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }));
-    return true;
+    return {
+      chores: j.chores || [],
+      records: j.records || [],
+      targets: (j.targets || []).map((t) => ({ scope: t.scope, key: normalizeTargetKey(t.scope, t.key), choreId: t.choreId }))
+    };
   } catch (e) {
-    state.connected = false;
-    setSync("未接続");
-    return false;
+    return null;
   }
 }
+function applySnap(snap) {
+  state.chores = snap.chores;
+  state.records = snap.records;
+  state.targets = snap.targets;
+}
+// 比較用ハッシュ：表示に影響する項目だけを抜き出し、順序に依存しない形にする
+function stateHash(s) {
+  const proj = {
+    c: s.chores.map((c) => JSON.stringify([c.id, c.name, c.freq, c.group || "", c.steps || "", c.minutes || 0, c.custom ? 1 : 0, c.deleted ? 1 : 0, c.order || 0])).sort(),
+    r: s.records.map((r) => JSON.stringify([r.date, r.choreId, r.who])).sort(),
+    t: s.targets.map((t) => JSON.stringify([t.scope, t.key, t.choreId])).sort()
+  };
+  return JSON.stringify(proj);
+}
 
-// 書き込みは1回だけ送る。応答が読めなかった場合は状態を読み戻し、
-// 変更が反映されていれば成功として扱う（盲目的な再送による二重登録を防ぐ）。
-async function postAndVerify(body, predicate) {
-  if (!API_URL) { showError("API未設定のため保存できません"); return false; }
-  let serverError = null;
+// ポーリング／フォーカス時の再取得。未送信の操作がある間は取得自体を延期し、
+// 前回と同一内容なら描画しない。実際に取り込んだ場合のみ true を返す
+async function refreshFromServer(opts) {
+  const force = Boolean(opts && opts.force);
+  if (!API_URL) { state.connected = false; setSync("未設定"); return false; }
+  if (hasPendingOps()) return false;
+  const snap = await fetchServerState();
+  if (!snap) {
+    state.connected = false;
+    if (!hasPendingOps()) setSync("未接続");
+    return false;
+  }
+  state.connected = true;
+  if (!force && stateHash(snap) === stateHash(state)) { markSynced(); return false; }
+  applySnap(snap);
+  markSynced();
+  return true;
+}
+
+/* ---------- 書き込みキュー ----------
+ * 操作はローカルへ即反映して即描画し、送信はキューで1件ずつ順番に行う。
+ * POST が ok を返したらそれを信頼し、全件再取得はしない。
+ * 応答が読めなかった／明示エラーだった操作がある時だけ、キューの最後に
+ * 1回だけ状態を読み戻して反映を確認する（盲目的な再送はしない）。 */
+const writeQueue = [];
+let queueRunning = false;
+function hasPendingOps() { return queueRunning || writeQueue.length > 0; }
+
+function enqueueWrite(op) {
+  if (!API_URL) { showError("API未設定のため保存できません"); return; }
+  if (op.key) {
+    // 同じキーへの未送信操作は新しい操作で置き換える（連打しても最終状態だけ送る）
+    const idx = writeQueue.findIndex((q) => q.key === op.key);
+    if (idx >= 0) { writeQueue[idx] = op; kickQueue(); return; }
+  }
+  writeQueue.push(op);
+  setSync("保存中…");
+  kickQueue();
+}
+function kickQueue() {
+  if (!queueRunning) { queueRunning = true; processQueue(); }
+}
+
+// POST を1回だけ送る。ok / 明示エラー / 応答未読 を区別して返す
+async function postWrite(body) {
   try {
     const res = await fetch(API_URL, {
       method: "POST",
@@ -170,56 +225,163 @@ async function postAndVerify(body, predicate) {
       body: JSON.stringify(Object.assign({}, body, { pin: state.pin }))
     });
     const j = await res.json();
-    if (j && j.ok) { await fetchState(); render(); return true; }
-    serverError = j && j.error ? j.error : "unknown";
+    if (j && j.ok) return { status: "ok", json: j };
+    return { status: "error", error: j && j.error ? j.error : "unknown" };
   } catch (e) {
-    serverError = null; // 応答未読：成功しているかもしれない
+    return { status: "unknown" }; // 応答未読：成功しているかもしれない
   }
-  await fetchState();
-  if (serverError === null && predicate && predicate()) { render(); return true; }
-  render();
-  if (serverError === "duplicate_name") showError("同じ名前の家事が既にあります");
-  else if (serverError === "conflict") showError("他の人が先に編集していました。最新の内容で開き直しました");
-  else if (serverError) showError("保存できませんでした（" + serverError + "）");
-  else showError("保存できたか確認できませんでした。最新の状態を表示しています");
-  return false;
+}
+// 読み戻したスナップショットに、その操作の結果が反映されているか
+function verifyLanded(op, snap) {
+  const b = op.body;
+  switch (b.action) {
+    case "setRecord":
+      return snap.records.some((r) => r.date === b.date && r.choreId === b.choreId && r.who === b.who);
+    case "clearRecord":
+      return !snap.records.some((r) => r.date === b.date && r.choreId === b.choreId);
+    case "setTarget": {
+      const has = snap.targets.some((t) => t.scope === b.scope && t.key === normalizeTargetKey(b.scope, b.key) && t.choreId === b.choreId);
+      return has === Boolean(b.on);
+    }
+    case "addChore":
+      return snap.chores.some((c) => c.name === b.chore.name && !c.deleted);
+    case "updateChore": {
+      const c = snap.chores.find((x) => x.id === b.id);
+      return Boolean(c && c.name === b.chore.name && (c.minutes || 0) === (b.chore.minutes || 0));
+    }
+    case "deleteChore": {
+      const c = snap.chores.find((x) => x.id === b.id);
+      return Boolean(c && c.deleted);
+    }
+    case "restoreChore": {
+      const c = snap.chores.find((x) => x.id === b.id);
+      return Boolean(c && !c.deleted);
+    }
+  }
+  return true;
+}
+function messageFor(op) {
+  if (op._result && op._result.status === "error") {
+    const err = op._result.error;
+    if (err === "duplicate_name") return "同じ名前の家事が既にあります";
+    if (err === "conflict") return "他の人が先に編集していました。最新の内容で開き直しました";
+    return "保存できませんでした（" + (err || "unknown") + "）";
+  }
+  return "保存できたか確認できませんでした。最新の状態を表示しています";
+}
+// 検証でサーバー状態を取り込んだ直後、まだ未送信の操作の楽観状態を再適用する
+function reapplyQueuedOps() {
+  for (const op of writeQueue) {
+    const b = op.body;
+    if (b.action === "setRecord") applyLocalRecord(b.date, b.choreId, b.who);
+    else if (b.action === "clearRecord") applyLocalRecord(b.date, b.choreId, null);
+    else if (b.action === "setTarget") applyLocalTargetRaw(b.scope, b.key, b.choreId, b.on);
+    else if (b.action === "addChore") { if (op.localChore && !choreById(op.localChore.id)) state.chores.push(op.localChore); }
+    else if (b.action === "updateChore") { const c = choreById(b.id); if (c) Object.assign(c, b.chore); }
+    else if (b.action === "deleteChore") { const c = choreById(b.id); if (c) c.deleted = true; }
+    else if (b.action === "restoreChore") { const c = choreById(b.id); if (c) c.deleted = false; }
+  }
+}
+async function processQueue() {
+  const outcomes = [];
+  let verifyFailed = false;
+  try {
+    while (writeQueue.length) {
+      const op = writeQueue.shift();
+      setSync("保存中…");
+      op._result = await postWrite(op.body);
+      outcomes.push(op);
+      if (op._result.status === "ok" && op.onSuccess) {
+        try { op.onSuccess(op._result.json); } catch (e) { /* 付け替え失敗は次の同期で回復 */ }
+      }
+    }
+    const needVerify = outcomes.some((o) => o._result.status !== "ok");
+    if (needVerify) {
+      const snap = await fetchServerState();
+      if (snap) {
+        const msgs = [];
+        for (const o of outcomes) {
+          if (o._result.status === "ok") continue;
+          if (!verifyLanded(o, snap)) {
+            if (o.onFail) { try { o.onFail(); } catch (e) { /* noop */ } }
+            msgs.push(messageFor(o));
+          }
+        }
+        applySnap(snap);
+        reapplyQueuedOps();
+        state.connected = true;
+        render();
+        if (msgs.length) showError(msgs[0]);
+      } else {
+        verifyFailed = true;
+        const explicit = outcomes.find((o) => o._result.status === "error");
+        const unknown = outcomes.find((o) => o._result.status === "unknown");
+        if (explicit) showError(messageFor(explicit));
+        else if (unknown) showError("保存できたか確認できませんでした。最新の状態を表示しています");
+      }
+    }
+  } finally {
+    queueRunning = false;
+    if (writeQueue.length) kickQueue();
+    else if (verifyFailed) { state.connected = false; setSync("未接続"); }
+    else { state.connected = true; markSynced(); }
+  }
+}
+// 追加した家事の仮IDを、サーバー発行の実IDへ付け替える（記録・対象・未送信操作も追随）
+function replaceTempId(oldId, newId) {
+  const c = choreById(oldId);
+  if (c) c.id = newId;
+  if (state.openSteps.has(oldId)) { state.openSteps.delete(oldId); state.openSteps.add(newId); }
+  if (state.editingId === oldId) state.editingId = newId;
+  if (state.lastDeleted && state.lastDeleted.id === oldId) state.lastDeleted.id = newId;
+  for (const r of state.records) if (r.choreId === oldId) r.choreId = newId;
+  for (const t of state.targets) if (t.choreId === oldId) t.choreId = newId;
+  for (const q of writeQueue) {
+    if (q.body.choreId === oldId) q.body.choreId = newId;
+    if (q.body.id === oldId) q.body.id = newId;
+    if (q.key) q.key = q.key.split(oldId).join(newId);
+    if (q.localChore && q.localChore.id === oldId) q.localChore.id = newId;
+  }
 }
 
-/* ---------- 記録・対象の操作（楽観反映 → APIで確定） ---------- */
+/* ---------- 記録・対象の操作（楽観反映 → キューで送信） ---------- */
 function applyLocalRecord(date, choreId, who) {
   const idx = state.records.findIndex((r) => r.date === date && r.choreId === choreId);
   if (who === null) { if (idx >= 0) state.records.splice(idx, 1); }
   else if (idx >= 0) state.records[idx].who = who;
   else state.records.push({ date, choreId, who });
 }
-async function tapWho(choreId, who) {
+function tapWho(choreId, who) {
   const date = todayStr();
   const cur = recordMap().get(date + "|" + choreId) || null;
   const next = cur === who ? null : who;
   applyLocalRecord(date, choreId, next);
   render();
   if (next === null) {
-    await postAndVerify({ action: "clearRecord", date, choreId },
-      () => !recordMap().has(date + "|" + choreId));
+    enqueueWrite({ key: "rec|" + date + "|" + choreId, body: { action: "clearRecord", date, choreId } });
   } else {
-    await postAndVerify({ action: "setRecord", date, choreId, who: next },
-      () => recordMap().get(date + "|" + choreId) === next);
+    enqueueWrite({ key: "rec|" + date + "|" + choreId, body: { action: "setRecord", date, choreId, who: next } });
   }
 }
-function applyLocalTarget(choreId, on) {
-  const { scope, key } = targetKey();
+function applyLocalTargetRaw(scope, key, choreId, on) {
   const idx = state.targets.findIndex((t) => t.scope === scope && t.key === key && t.choreId === choreId);
   if (on && idx < 0) state.targets.push({ scope, key, choreId });
   if (!on && idx >= 0) state.targets.splice(idx, 1);
 }
-async function setTarget(choreId, on) {
+function applyLocalTarget(choreId, on) {
+  const { scope, key } = targetKey();
+  applyLocalTargetRaw(scope, key, choreId, on);
+}
+function setTarget(choreId, on) {
   applyLocalTarget(choreId, on);
   render();
   const { scope, key } = targetKey();
-  await postAndVerify({ action: "setTarget", scope, key, choreId, on },
-    () => targetSet().has(choreId) === on);
+  enqueueWrite({
+    key: "tgt|" + scope + "|" + key + "|" + choreId,
+    body: { action: "setTarget", scope, key, choreId, on }
+  });
 }
-async function applyPreset() {
+function applyPreset() {
   const { meal, laundry } = state.presets;
   const daily = activeChores("daily");
   const want = new Set();
@@ -230,18 +392,18 @@ async function applyPreset() {
     if (laundry && c.group === "laundry") want.add(c.id);
   }
   const cur = targetSet();
-  const jobs = [];
+  const { scope, key } = targetKey();
   for (const c of daily) {
     const should = want.has(c.id);
     if (should !== cur.has(c.id)) {
       applyLocalTarget(c.id, should);
-      const { scope, key } = targetKey();
-      jobs.push(postAndVerify({ action: "setTarget", scope, key, choreId: c.id, on: should },
-        () => targetSet().has(c.id) === should));
+      enqueueWrite({
+        key: "tgt|" + scope + "|" + key + "|" + c.id,
+        body: { action: "setTarget", scope, key, choreId: c.id, on: should }
+      });
     }
   }
   render();
-  await Promise.all(jobs);
 }
 
 /* ---------- 描画 ---------- */
@@ -508,8 +670,15 @@ document.addEventListener("click", async (e) => {
       const c = choreById(del.id);
       if (c) c.deleted = false;
       render();
-      await postAndVerify({ action: "restoreChore", id: del.id },
-        () => { const cc = choreById(del.id); return cc && !cc.deleted; });
+      enqueueWrite({
+        body: { action: "restoreChore", id: del.id },
+        onFail: () => {
+          // 復元できていなければ、元に戻すバーを再表示する
+          state.lastDeleted = del;
+          document.getElementById("undoText").textContent = `「${del.name}」を削除しました`;
+          document.getElementById("undoBar").classList.remove("hidden");
+        }
+      });
     }
     return;
   }
@@ -541,8 +710,14 @@ document.addEventListener("click", async (e) => {
     document.getElementById("undoText").textContent = `「${c.name}」を削除しました`;
     bar.classList.remove("hidden");
     render();
-    await postAndVerify({ action: "deleteChore", id },
-      () => { const cc = choreById(id); return cc && cc.deleted; });
+    enqueueWrite({
+      body: { action: "deleteChore", id },
+      onFail: () => {
+        // 削除できていなければ、元に戻すバーは消す（実体は残っているため）
+        state.lastDeleted = null;
+        document.getElementById("undoBar").classList.add("hidden");
+      }
+    });
     return;
   }
   if (act === "addopen") { state.addOpen[btn.dataset.freq] = true; render(); return; }
@@ -572,12 +747,16 @@ document.addEventListener("submit", async (e) => {
     if (Number.isNaN(minutes) || minutes < 0) minutes = 10;
     if (minutes > 600) minutes = 600;
     const tempId = "tmp" + Date.now().toString(36);
-    state.chores.push({ id: tempId, name, freq, group: "", steps, minutes, custom: true, deleted: false, order: 9999 });
+    const newChore = { id: tempId, name, freq, group: "", steps, minutes, custom: true, deleted: false, order: 9999 };
+    state.chores.push(newChore);
     state.addOpen[form.dataset.freq] = false;
     state.tab = freq;
     render();
-    await postAndVerify({ action: "addChore", chore: { name, freq, steps, minutes } },
-      () => state.chores.some((c) => c.name === name && !c.deleted));
+    enqueueWrite({
+      body: { action: "addChore", chore: { name, freq, steps, minutes } },
+      localChore: newChore,
+      onSuccess: (j) => { if (j && j.id) { replaceTempId(tempId, j.id); render(); } }
+    });
     return;
   }
   if (form.dataset.form === "edit") {
@@ -592,8 +771,9 @@ document.addEventListener("submit", async (e) => {
     state.editingId = null;
     state.tab = freq;
     render();
-    await postAndVerify({ action: "updateChore", id, expect: { name: expectName }, chore: { name, freq, steps, minutes } },
-      () => { const cc = choreById(id); return cc && cc.name === name && cc.minutes === minutes; });
+    enqueueWrite({
+      body: { action: "updateChore", id, expect: { name: expectName }, chore: { name, freq, steps, minutes } }
+    });
   }
 });
 
@@ -603,15 +783,14 @@ async function init() {
   state.calCursor = { y: now.getFullYear(), m: now.getMonth() };
   state.selectedDay = todayStr();
   render();
-  await fetchState();
-  render();
+  if (await refreshFromServer({ force: true })) render();
   setInterval(async () => {
     if (state.editingId) return; // 編集中は上書きしない
-    if (await fetchState()) render();
+    if (await refreshFromServer()) render();
   }, 15000);
   document.addEventListener("visibilitychange", async () => {
     if (document.visibilityState === "visible" && !state.editingId) {
-      if (await fetchState()) render();
+      if (await refreshFromServer()) render();
     }
   });
   if ("serviceWorker" in navigator) {
