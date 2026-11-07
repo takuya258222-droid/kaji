@@ -81,6 +81,9 @@ main { padding: 12px 16px 24px; max-width: 640px; margin: 0 auto; }
 .seg-btn { border: 0; background: #fff; padding: 7px 12px; min-height: 40px; font-size: 13px; color: var(--muted); }
 .seg-btn.active { background: var(--green); color: #fff; font-weight: 700; }
 .group-title { font-size: 13px; color: var(--muted); margin: 14px 0 6px; font-weight: 700; }
+.section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 6px 12px; flex-wrap: wrap; margin: 22px 0 10px; padding: 11px 14px; background: #e2eee3; border-left: 6px solid var(--green); border-radius: 10px; }
+.section-title { font-size: 19px; font-weight: 800; color: var(--green-dark); letter-spacing: .02em; }
+.section-meta { font-size: 13px; font-weight: 700; color: var(--muted); }
 
 .chore { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px; margin-bottom: 10px; overflow-wrap: anywhere; }
 .chore.done { background: #eef7f0; border-color: var(--green); }

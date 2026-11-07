@@ -2,7 +2,7 @@
 
 // Apps Script ウェブアプリの URL（家事API v2）
 const API_URL = "https://script.google.com/macros/s/AKfycbx91iMFxq6gxpFuIsZR9Ok93ZZrH4DRrCWrRYhKuRk9QWLlpyX8YUDJKBdGaBXC-mi7ZA/exec";
-const APP_VERSION = "1.1";
+const APP_VERSION = "1.2";
 const STATE_CACHE_KEY = "kaji_state_cache_v1";
 const WRITE_QUEUE_KEY = "kaji_write_queue_v1";
 
@@ -37,11 +37,11 @@ const state = {
   chores: [],
   records: [], // {date, choreId, who}
   targets: [], // {scope, key, choreId}
-  tab: "daily",
-  groupMode: { daily: "freq", weekly: "freq", monthly: "freq" },
+  tab: "today", // "today" | "history" の2ビュー
+  groupMode: "freq", // 全家事リスト全体に対する表示切替: "freq" | "time"
   openSteps: new Set(),
   editingId: null,
-  addOpen: { daily: false, weekly: false, monthly: false },
+  addOpen: { daily: false, weekly: false, monthly: false, any: false },
   presets: { meal: null, laundry: false }, // meal: "cook"|"eatout"|null
   calCursor: null, // {y, m}
   selectedDay: null, // yyyy-MM-dd
@@ -761,7 +761,8 @@ function renderTargetPanel() {
   el.innerHTML = `<div class="target-meta">対象 ${items.length}件中 ${doneCount}件完了 ｜ 合計見込み 約${totalMin}分（残り 約${restMin}分）</div>
     <div class="progress"><div style="width:${pct}%"></div></div>` + rows;
 }
-function choreCardHtml(c, freq) {
+function choreCardHtml(c) {
+  const freq = c.freq;
   const t = todayStr();
   const todayWho = recordMap().get(t + "|" + c.id) || null;
   const rec = periodRecord(c.id, freq);
@@ -789,6 +790,7 @@ function choreCardHtml(c, freq) {
   return `<div class="chore ${rec ? "done" : ""}" data-card="${esc(c.id)}">
     <div class="chore-top"><span class="chore-name">${esc(c.name)}</span>
       <span class="chore-min">約${c.minutes || 10}分</span>
+      ${state.groupMode === "time" ? `<span class="badge freq">${esc(FREQ_LABEL[freq] || "")}</span>` : ""}
       ${c.custom ? `<span class="custom-badge">追加</span>` : ""}
       ${rec ? `<span class="badge done">✓完了</span>` : ""}</div>
     <div class="chore-status">${esc(status)}</div>
@@ -815,14 +817,9 @@ function editFormHtml(c) {
     <p class="form-note">保存するとあやの画面にも反映されます。</p>
   </form>`;
 }
+// 頻度別表示のときの、頻度ごとの小グループ（毎日だけ発生条件で分ける）
 function groupedChores(freq) {
   const items = activeChores(freq);
-  if (state.groupMode[freq] === "time") {
-    return TIME_BANDS.map(([lo, hi, label]) => ({
-      label,
-      items: items.filter((c) => { const m = c.minutes || 10; return m >= lo && m <= hi; })
-    })).filter((g) => g.items.length);
-  }
   if (freq === "daily") {
     return DAILY_GROUPS.map(([key, label]) => ({
       label,
@@ -831,36 +828,76 @@ function groupedChores(freq) {
   }
   return [{ label: "", items }];
 }
-function renderList(freq) {
-  const el = document.getElementById("list-" + freq);
-  const groups = groupedChores(freq);
-  if (!groups.length) { el.innerHTML = `<p class="empty-note">家事がありません</p>`; }
-  else {
-    el.innerHTML = groups.map((g) =>
-      (g.label ? `<div class="group-title">${esc(g.label)}</div>` : "") +
-      g.items.map((c) => choreCardHtml(c, freq)).join("")
-    ).join("");
+function mdLabel(s) { return Number(s.slice(5, 7)) + "/" + Number(s.slice(8, 10)); }
+// セクション見出し：名前＋期間の状態（範囲と完了数）
+function sectionHeadHtml(title, meta) {
+  return `<div class="section-head"><span class="section-title">${esc(title)}</span><span class="section-meta">${esc(meta)}</span></div>`;
+}
+function freqSectionHead(freq) {
+  const items = activeChores(freq);
+  const done = items.filter((c) => periodRecord(c.id, freq)).length;
+  let meta;
+  if (freq === "daily") meta = `今日 ・ ${done}/${items.length}件完了`;
+  else if (freq === "weekly") { const [f, t] = periodRange(freq); meta = `今週 ${mdLabel(f)}〜${mdLabel(t)} ・ ${done}/${items.length}件完了`; }
+  else meta = `${new Date().getMonth() + 1}月 ・ ${done}/${items.length}件完了`;
+  return sectionHeadHtml(FREQ_LABEL[freq], meta);
+}
+// 追加ボタン／追加フォーム（key は addOpen のキー、defaultFreq は頻度の初期選択）
+function fillAddForm(el, key, defaultFreq) {
+  if (!el) return;
+  if (!state.addOpen[key]) {
+    el.innerHTML = `<button type="button" class="add-open-btn" data-act="addopen" data-freq="${key}">＋ 家事を追加</button>`;
+    return;
   }
-  document.querySelectorAll(`#view-${freq} .seg-btn`).forEach((b) => {
-    const active = b.dataset.mode === state.groupMode[freq];
+  el.innerHTML = `<form class="add-form" data-form="add" data-freq="${key}">
+    <label for="add-name-${key}">家事の名前（必須）</label><input id="add-name-${key}" name="name" maxlength="60" required placeholder="例：浴室の鏡磨き">
+    <label for="add-freq-${key}">頻度</label><select id="add-freq-${key}" name="freq">${Object.keys(FREQ_LABEL).map((f) => `<option value="${f}" ${f === defaultFreq ? "selected" : ""}>${FREQ_LABEL[f]}</option>`).join("")}</select>
+    <label for="add-minutes-${key}">所要時間（分・任意）</label><input id="add-minutes-${key}" name="minutes" type="number" min="0" max="600" step="1" placeholder="10">
+    <label for="add-steps-${key}">やり方（任意・1行に1手順）</label><textarea id="add-steps-${key}" name="steps" rows="4" maxlength="2000"></textarea>
+    <div class="form-btns"><button type="submit" class="primary-btn">追加する</button>
+    <button type="button" class="plain-btn" data-act="addcancel" data-freq="${key}">やめる</button></div>
+    <p class="form-note">追加するとあやの画面にも表示されます。</p>
+  </form>`;
+}
+// 全家事リスト：頻度別なら頻度セクション、時間別なら時間帯セクションで全家事を並べる
+function renderChoreSections() {
+  const wrap = document.getElementById("choreSections");
+  if (!wrap) return;
+  document.querySelectorAll("#view-today .seg-btn").forEach((b) => {
+    const active = b.dataset.mode === state.groupMode;
     b.classList.toggle("active", active);
     b.setAttribute("aria-pressed", active ? "true" : "false");
   });
-  // 追加フォーム
-  const addEl = document.getElementById("add-" + freq);
-  if (!state.addOpen[freq]) {
-    addEl.innerHTML = `<button type="button" class="add-open-btn" data-act="addopen" data-freq="${freq}">＋ 家事を追加</button>`;
+  let html = "";
+  const addSlots = [];
+  if (state.groupMode === "time") {
+    const items = activeChores();
+    if (!items.length) html += `<p class="empty-note">家事がありません</p>`;
+    for (const [lo, hi, label] of TIME_BANDS) {
+      const band = items.filter((c) => { const m = c.minutes || 10; return m >= lo && m <= hi; });
+      if (!band.length) continue;
+      html += sectionHeadHtml(label, band.length + "件");
+      html += band.map((c) => choreCardHtml(c)).join("");
+    }
+    html += `<div id="add-any"></div>`;
+    addSlots.push(["add-any", "any", "daily"]);
   } else {
-    addEl.innerHTML = `<form class="add-form" data-form="add" data-freq="${freq}">
-      <label for="add-name-${freq}">家事の名前（必須）</label><input id="add-name-${freq}" name="name" maxlength="60" required placeholder="例：浴室の鏡磨き">
-      <label for="add-freq-${freq}">頻度</label><select id="add-freq-${freq}" name="freq">${Object.keys(FREQ_LABEL).map((f) => `<option value="${f}" ${f === freq ? "selected" : ""}>${FREQ_LABEL[f]}</option>`).join("")}</select>
-      <label for="add-minutes-${freq}">所要時間（分・任意）</label><input id="add-minutes-${freq}" name="minutes" type="number" min="0" max="600" step="1" placeholder="10">
-      <label for="add-steps-${freq}">やり方（任意・1行に1手順）</label><textarea id="add-steps-${freq}" name="steps" rows="4" maxlength="2000"></textarea>
-      <div class="form-btns"><button type="submit" class="primary-btn">追加する</button>
-      <button type="button" class="plain-btn" data-act="addcancel" data-freq="${freq}">やめる</button></div>
-      <p class="form-note">追加するとあやの画面にも表示されます。</p>
-    </form>`;
+    for (const freq of ["daily", "weekly", "monthly"]) {
+      html += freqSectionHead(freq);
+      const groups = groupedChores(freq);
+      if (!groups.length) html += `<p class="empty-note">家事がありません</p>`;
+      else {
+        html += groups.map((g) =>
+          (g.label ? `<div class="group-title">${esc(g.label)}</div>` : "") +
+          g.items.map((c) => choreCardHtml(c)).join("")
+        ).join("");
+      }
+      html += `<div id="add-${freq}"></div>`;
+      addSlots.push(["add-" + freq, freq, freq]);
+    }
   }
+  wrap.innerHTML = html;
+  for (const [slotId, key, def] of addSlots) fillAddForm(document.getElementById(slotId), key, def);
 }
 function renderHistory() {
   const now = new Date();
@@ -921,12 +958,10 @@ function render(options) {
   const versionEl = document.getElementById("appVersion");
   if (versionEl) versionEl.textContent = "v" + APP_VERSION;
   document.getElementById("apiNotice").classList.toggle("hidden", Boolean(API_URL));
-  for (const freq of ["daily", "weekly", "monthly"]) {
-    document.getElementById("view-" + freq).classList.toggle("hidden", state.tab !== freq);
-    if (state.tab === freq) renderList(freq);
-  }
+  const isToday = state.tab !== "history";
+  document.getElementById("view-today").classList.toggle("hidden", !isToday);
   document.getElementById("view-history").classList.toggle("hidden", state.tab !== "history");
-  if (state.tab === "daily") { renderShare(); renderTodayDone(); renderPresets(); renderTargetPanel(); }
+  if (isToday) { renderShare(); renderTodayDone(); renderPresets(); renderTargetPanel(); renderChoreSections(); }
   if (state.tab === "history") renderHistory();
   document.querySelectorAll(".tab").forEach((b) => {
     const active = b.dataset.tab === state.tab;
@@ -943,9 +978,7 @@ document.addEventListener("click", async (e) => {
   if (tabBtn) { state.tab = tabBtn.dataset.tab; render({ keepScroll: false }); return; }
   const seg = e.target.closest(".seg-btn");
   if (seg) {
-    const view = seg.closest(".view");
-    const freq = view.id.replace("view-", "");
-    state.groupMode[freq] = seg.dataset.mode;
+    state.groupMode = seg.dataset.mode;
     render();
     return;
   }
@@ -1059,10 +1092,8 @@ document.addEventListener("submit", async (e) => {
     const newChore = { id: tempId, name, freq, group: "", steps, minutes, custom: true, deleted: false, order: 9999 };
     state.chores.push(newChore);
     state.addOpen[form.dataset.freq] = false;
-    const tabChanged = state.tab !== freq;
-    state.tab = freq;
     persistStateCache();
-    render({ keepScroll: !tabChanged });
+    render();
     enqueueWrite({
       body: { action: "addChore", chore: { name, freq, steps, minutes } },
       localChore: newChore,
@@ -1081,10 +1112,8 @@ document.addEventListener("submit", async (e) => {
     const expectName = c.name;
     Object.assign(c, { name, freq, steps, minutes });
     state.editingId = null;
-    const tabChanged = state.tab !== freq;
-    state.tab = freq;
     persistStateCache();
-    render({ keepScroll: !tabChanged });
+    render();
     consumeDateRollover();
     enqueueWrite({
       body: { action: "updateChore", id, expect: { name: expectName }, chore: { name, freq, steps, minutes } }

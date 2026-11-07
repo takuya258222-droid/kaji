@@ -29,10 +29,8 @@
 <div id="errorBar" class="error-bar hidden" role="alert"></div>
 <div id="undoBar" class="undo-bar hidden"><span id="undoText"></span><button id="undoButton" type="button">元に戻す</button></div>
 
-<nav class="tabs" id="tabs" role="tablist" aria-label="家事の表示切り替え">
-  <button type="button" data-tab="daily" class="tab active" role="tab" aria-selected="true">毎日</button>
-  <button type="button" data-tab="weekly" class="tab" role="tab" aria-selected="false">週1回</button>
-  <button type="button" data-tab="monthly" class="tab" role="tab" aria-selected="false">月1回くらい</button>
+<nav class="tabs" id="tabs" role="tablist" aria-label="表示切り替え">
+  <button type="button" data-tab="today" class="tab active" role="tab" aria-selected="true">今日</button>
   <button type="button" data-tab="history" class="tab" role="tab" aria-selected="false">履歴</button>
 </nav>
 
@@ -41,8 +39,8 @@
     <span id="loadingText">読み込み中…</span>
     <button id="retryLoadButton" class="plain-btn hidden" type="button">再読み込み</button>
   </div>
-  <!-- 今日（毎日） -->
-  <section id="view-daily" class="view">
+  <!-- 今日（対象・今日やった家事・分担・全家事リストを1画面に集約） -->
+  <section id="view-today" class="view">
     <div class="card target-card">
       <h2>今日の対象</h2>
       <div class="preset-row">
@@ -65,40 +63,13 @@
     </div>
 
     <div class="list-head">
-      <h2>毎日の家事</h2>
-      <div class="seg">
+      <h2>全家事リスト</h2>
+      <div class="seg" role="group" aria-label="並び替え">
         <button type="button" data-mode="freq" class="seg-btn active" aria-pressed="true">頻度別</button>
         <button type="button" data-mode="time" class="seg-btn" aria-pressed="false">時間別</button>
       </div>
     </div>
-    <div id="list-daily"></div>
-    <div id="add-daily"></div>
-  </section>
-
-  <!-- 週1回 -->
-  <section id="view-weekly" class="view hidden">
-    <div class="list-head">
-      <h2>週1回の家事</h2>
-      <div class="seg">
-        <button type="button" data-mode="freq" class="seg-btn active" aria-pressed="true">頻度別</button>
-        <button type="button" data-mode="time" class="seg-btn" aria-pressed="false">時間別</button>
-      </div>
-    </div>
-    <div id="list-weekly"></div>
-    <div id="add-weekly"></div>
-  </section>
-
-  <!-- 月1回くらい -->
-  <section id="view-monthly" class="view hidden">
-    <div class="list-head">
-      <h2>月1回くらいの家事</h2>
-      <div class="seg">
-        <button type="button" data-mode="freq" class="seg-btn active" aria-pressed="true">頻度別</button>
-        <button type="button" data-mode="time" class="seg-btn" aria-pressed="false">時間別</button>
-      </div>
-    </div>
-    <div id="list-monthly"></div>
-    <div id="add-monthly"></div>
+    <div id="choreSections"></div>
   </section>
 
   <!-- 履歴 -->
@@ -120,7 +91,7 @@
   </section>
 </main>
 
-<footer class="app-footer">家事アプリ <span id="appVersion">v1.1</span>｜記録は自動で保存され、あやと同期されます。</footer>
+<footer class="app-footer">家事アプリ <span id="appVersion">v1.2</span>｜記録は自動で保存され、あやと同期されます。</footer>
 
 <script src="./app.js"></script>
 </body>
