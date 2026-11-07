@@ -162,3 +162,13 @@ main { padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16
   .list-head { flex-wrap: wrap; gap: 8px; }
   .notice, .error-bar, .undo-bar { margin-left: 12px; margin-right: 12px; }
 }
+
+.loading-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); }
+.loading-card .plain-btn { flex: none; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 3px solid #f2b544;
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; }
+}

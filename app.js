@@ -1,7 +1,15 @@
 "use strict";
 
-// Apps Script ウェブアプリの URL（家事API v1）
+// Apps Script ウェブアプリの URL（家事API v2）
 const API_URL = "https://script.google.com/macros/s/AKfycbx91iMFxq6gxpFuIsZR9Ok93ZZrH4DRrCWrRYhKuRk9QWLlpyX8YUDJKBdGaBXC-mi7ZA/exec";
+const APP_VERSION = "1.1";
+const STATE_CACHE_KEY = "kaji_state_cache_v1";
+const WRITE_QUEUE_KEY = "kaji_write_queue_v1";
+
+// localStorage はプライベートモード等で例外になることがあるため、必ずラッパー経由にする
+function storageGet(key) { try { return window.localStorage.getItem(key); } catch (e) { return null; } }
+function storageSet(key, value) { try { window.localStorage.setItem(key, value); return true; } catch (e) { return false; } }
+function storageRemove(key) { try { window.localStorage.removeItem(key); } catch (e) { /* noop */ } }
 
 const WHO_LIST = ["卓也", "あや", "ふたりで"];
 const WHO_CLASS = { "卓也": "takuya", "あや": "aya", "ふたりで": "both" };
@@ -24,7 +32,7 @@ const TIME_BANDS = [
 ];
 
 const state = {
-  pin: localStorage.getItem("kaji_pin") || "",
+  pin: storageGet("kaji_pin") || "",
   connected: false,
   chores: [],
   records: [], // {date, choreId, who}
@@ -37,7 +45,11 @@ const state = {
   presets: { meal: null, laundry: false }, // meal: "cook"|"eatout"|null
   calCursor: null, // {y, m}
   selectedDay: null, // yyyy-MM-dd
-  lastDeleted: null
+  lastDeleted: null,
+  currentDate: null,
+  rolloverPending: false,
+  rolloverFrom: null,
+  hasCachedState: false
 };
 
 function pad(n) { return ("0" + n).slice(-2); }
@@ -47,6 +59,10 @@ function parseDate(s) { const p = s.split("-"); return new Date(Number(p[0]), Nu
 function addDays(s, n) { const d = parseDate(s); d.setDate(d.getDate() + n); return fmtDate(d); }
 function mondayOf(s) { const d = parseDate(s); const dow = (d.getDay() + 6) % 7; d.setDate(d.getDate() - dow); return fmtDate(d); }
 function monthKeyOf(s) { return s.slice(0, 7); }
+function isValidDateText(s) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(s || ""))) return false;
+  return fmtDate(parseDate(s)) === s;
+}
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
@@ -123,10 +139,145 @@ function shareOf(records) {
   return { takuya, aya, raw, total, pT, pA };
 }
 
+/* ---------- 日付またぎ ---------- */
+function updateTodayLabel() {
+  const el = document.getElementById("todayLabel");
+  if (!el) return;
+  const t = new Date();
+  el.textContent = `${t.getFullYear()}年${t.getMonth() + 1}月${t.getDate()}日（${"日月火水木金土"[t.getDay()]}）`;
+}
+function finishDateRollover(previous) {
+  const current = todayStr();
+  const wasSelectedToday = state.selectedDay === previous;
+  state.presets = { meal: null, laundry: false };
+  if (wasSelectedToday) {
+    state.selectedDay = current;
+    const now = new Date();
+    state.calCursor = { y: now.getFullYear(), m: now.getMonth() };
+  }
+  render();
+}
+function checkDateRollover() {
+  const current = todayStr();
+  if (!state.currentDate) { state.currentDate = current; return false; }
+  if (current === state.currentDate) return false;
+  const previous = state.currentDate;
+  state.currentDate = current;
+  updateTodayLabel();
+  if (state.editingId) {
+    state.rolloverPending = true;
+    state.rolloverFrom = previous;
+    return true;
+  }
+  finishDateRollover(previous);
+  return true;
+}
+function consumeDateRollover() {
+  if (!state.rolloverPending || state.editingId) return false;
+  const previous = state.rolloverFrom;
+  state.rolloverPending = false;
+  state.rolloverFrom = null;
+  if (previous) finishDateRollover(previous);
+  return true;
+}
+
+/* ---------- 状態データの検証・キャッシュ ---------- */
+function cleanText(value, max) { return String(value == null ? "" : value).slice(0, max); }
+function sanitizeChore(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const id = cleanText(raw.id, 100).trim();
+  const name = cleanText(raw.name, 60).trim();
+  if (!id || !name) return null;
+  const minutesNum = Number(raw.minutes);
+  const orderNum = Number(raw.order);
+  return {
+    id: id,
+    name: name,
+    freq: Object.prototype.hasOwnProperty.call(FREQ_LABEL, raw.freq) ? raw.freq : "daily",
+    group: cleanText(raw.group, 50),
+    steps: cleanText(raw.steps, 2000),
+    minutes: Number.isFinite(minutesNum) ? Math.min(600, Math.max(0, Math.round(minutesNum))) : 0,
+    custom: raw.custom === true || String(raw.custom || "") === "1",
+    deleted: raw.deleted === true || String(raw.deleted || "") === "1",
+    order: Number.isFinite(orderNum) ? orderNum : 0
+  };
+}
+function sanitizeSnapshot(raw) {
+  if (!raw || typeof raw !== "object" || !Array.isArray(raw.chores) || !Array.isArray(raw.records) || !Array.isArray(raw.targets)) return null;
+  const chores = raw.chores.map(sanitizeChore).filter(Boolean);
+  if (raw.chores.length && !chores.length) return null;
+  const records = [];
+  for (const r of raw.records) {
+    if (!r || typeof r !== "object") continue;
+    const date = cleanText(r.date, 10);
+    const choreId = cleanText(r.choreId, 100).trim();
+    if (!isValidDateText(date) || !choreId || WHO_LIST.indexOf(r.who) < 0) continue;
+    records.push({ date: date, choreId: choreId, who: r.who });
+  }
+  const targets = [];
+  for (const t of raw.targets) {
+    if (!t || typeof t !== "object") continue;
+    const scope = cleanText(t.scope, 10);
+    const choreId = cleanText(t.choreId, 100).trim();
+    const key = normalizeTargetKey(scope, t.key);
+    if (["day", "week", "month"].indexOf(scope) < 0 || !key || !choreId) continue;
+    targets.push({ scope: scope, key: key, choreId: choreId });
+  }
+  return { chores: chores, records: records, targets: targets };
+}
+function persistStateCache() {
+  storageSet(STATE_CACHE_KEY, JSON.stringify({
+    version: 1,
+    savedAt: new Date().toISOString(),
+    snapshot: { chores: state.chores, records: state.records, targets: state.targets }
+  }));
+}
+function loadStateCache() {
+  try {
+    const raw = storageGet(STATE_CACHE_KEY);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.version !== 1) throw new Error("bad_cache");
+    const snap = sanitizeSnapshot(parsed.snapshot);
+    if (!snap || !snap.chores.length) throw new Error("empty_cache");
+    applySnap(snap);
+    state.hasCachedState = true;
+    return true;
+  } catch (e) {
+    storageRemove(STATE_CACHE_KEY);
+    state.hasCachedState = false;
+    return false;
+  }
+}
+
 /* ---------- API ---------- */
-function setSync(text) { document.getElementById("syncStatus").textContent = text; }
+function setSync(text) { const el = document.getElementById("syncStatus"); if (el) el.textContent = text; }
+function setLoadingState(mode) {
+  const el = document.getElementById("loadingState");
+  if (!el) return;
+  if (mode === "hidden") { el.classList.add("hidden"); return; }
+  el.classList.remove("hidden");
+  const text = document.getElementById("loadingText");
+  const btn = document.getElementById("retryLoadButton");
+  if (mode === "error") {
+    if (text) text.textContent = "読み込みできませんでした。通信状態を確認して、もう一度お試しください。";
+    if (btn) btn.classList.remove("hidden");
+  } else {
+    if (text) text.textContent = "読み込み中…";
+    if (btn) btn.classList.add("hidden");
+  }
+}
 function markSynced() {
   setSync("同期済み " + new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }));
+}
+function pendingWriteCount() { return writeQueue.length + (activeWriteOp ? 1 : 0); }
+function refreshSyncLabel() {
+  if (!API_URL) { setSync("未設定"); return; }
+  const n = pendingWriteCount();
+  if (!navigator.onLine) { setSync("オフライン（未送信" + n + "件）"); return; }
+  if (n > 0) { setSync("保存中…"); return; }
+  if (state.connected) markSynced();
+  else setSync("未接続");
 }
 function showError(msg) {
   const bar = document.getElementById("errorBar");
@@ -145,15 +296,11 @@ async function fetchServerState() {
     if (!j || !j.ok) {
       if (j && j.error === "unauthorized") {
         const pin = window.prompt("合言葉を入力してください");
-        if (pin) { state.pin = pin; localStorage.setItem("kaji_pin", pin); return fetchServerState(); }
+        if (pin) { state.pin = pin; storageSet("kaji_pin", pin); return fetchServerState(); }
       }
       return null;
     }
-    return {
-      chores: j.chores || [],
-      records: j.records || [],
-      targets: (j.targets || []).map((t) => ({ scope: t.scope, key: normalizeTargetKey(t.scope, t.key), choreId: t.choreId }))
-    };
+    return sanitizeSnapshot(j);
   } catch (e) {
     return null;
   }
@@ -182,13 +329,14 @@ async function refreshFromServer(opts) {
   const snap = await fetchServerState();
   if (!snap) {
     state.connected = false;
-    if (!hasPendingOps()) setSync("未接続");
+    refreshSyncLabel();
     return false;
   }
   state.connected = true;
-  if (!force && stateHash(snap) === stateHash(state)) { markSynced(); return false; }
+  if (!force && stateHash(snap) === stateHash(state)) { refreshSyncLabel(); return false; }
   applySnap(snap);
-  markSynced();
+  persistStateCache();
+  refreshSyncLabel();
   return true;
 }
 
@@ -199,21 +347,97 @@ async function refreshFromServer(opts) {
  * 1回だけ状態を読み戻して反映を確認する（盲目的な再送はしない）。 */
 const writeQueue = [];
 let queueRunning = false;
-function hasPendingOps() { return queueRunning || writeQueue.length > 0; }
+let activeWriteOp = null;
+function hasPendingOps() { return queueRunning || activeWriteOp !== null || writeQueue.length > 0; }
+
+const WRITE_ACTIONS = ["setRecord", "clearRecord", "setTarget", "addChore", "updateChore", "deleteChore", "restoreChore"];
+function sanitizeQueueChore(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const c = sanitizeChore({ id: "queue", name: raw.name, freq: raw.freq, steps: raw.steps, minutes: raw.minutes, custom: true });
+  if (!c) return null;
+  return { name: c.name, freq: c.freq, steps: c.steps, minutes: c.minutes };
+}
+function sanitizeQueueOp(raw, wasActive) {
+  if (!raw || typeof raw !== "object" || !raw.body || typeof raw.body !== "object") return null;
+  const body = Object.assign({}, raw.body);
+  if (WRITE_ACTIONS.indexOf(body.action) < 0) return null;
+  if (body.date != null) { body.date = cleanText(body.date, 10); if (!isValidDateText(body.date)) return null; }
+  if (body.choreId != null) { body.choreId = cleanText(body.choreId, 100).trim(); if (!body.choreId) return null; }
+  if (body.id != null) { body.id = cleanText(body.id, 100).trim(); if (!body.id) return null; }
+  if (body.scope != null) {
+    body.scope = cleanText(body.scope, 10);
+    body.key = normalizeTargetKey(body.scope, body.key);
+    body.on = body.on === true || body.on === "true";
+    if (["day", "week", "month"].indexOf(body.scope) < 0 || !body.key) return null;
+  }
+  if (body.who != null && WHO_LIST.indexOf(body.who) < 0) return null;
+  if (body.chore != null) { body.chore = sanitizeQueueChore(body.chore); if (!body.chore) return null; }
+  if (body.expect != null) body.expect = { name: cleanText(body.expect && body.expect.name, 60) };
+  const localChore = raw.localChore ? sanitizeChore(raw.localChore) : null;
+  let undoOnFail = null;
+  if (raw.undoOnFail && typeof raw.undoOnFail === "object") {
+    const id = cleanText(raw.undoOnFail.id, 100).trim();
+    const name = cleanText(raw.undoOnFail.name, 60).trim();
+    if (id && name) undoOnFail = { id: id, name: name };
+  }
+  return {
+    key: typeof raw.key === "string" ? raw.key.slice(0, 220) : null,
+    body: body,
+    tempId: typeof raw.tempId === "string" ? raw.tempId.slice(0, 100) : null,
+    localChore: localChore,
+    undoOnFail: undoOnFail,
+    needsVerify: Boolean(raw.needsVerify || wasActive)
+  };
+}
+function serializeWriteOp(op, inflight) {
+  return {
+    key: op.key || null,
+    body: op.body,
+    tempId: op.tempId || null,
+    localChore: op.localChore || null,
+    undoOnFail: op.undoOnFail || null,
+    needsVerify: Boolean(op.needsVerify || inflight)
+  };
+}
+function persistWriteQueue() {
+  const all = [];
+  if (activeWriteOp) all.push(serializeWriteOp(activeWriteOp, true));
+  for (const op of writeQueue) all.push(serializeWriteOp(op, false));
+  storageSet(WRITE_QUEUE_KEY, JSON.stringify(all));
+}
+function restoreWriteQueue() {
+  try {
+    const raw = storageGet(WRITE_QUEUE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error("bad_queue");
+    for (const item of parsed) {
+      const op = sanitizeQueueOp(item, false);
+      if (op) writeQueue.push(op);
+    }
+  } catch (e) {
+    storageRemove(WRITE_QUEUE_KEY);
+    writeQueue.length = 0;
+  }
+}
 
 function enqueueWrite(op) {
   if (!API_URL) { showError("API未設定のため保存できません"); return; }
   if (op.key) {
     // 同じキーへの未送信操作は新しい操作で置き換える（連打しても最終状態だけ送る）
     const idx = writeQueue.findIndex((q) => q.key === op.key);
-    if (idx >= 0) { writeQueue[idx] = op; kickQueue(); return; }
+    if (idx >= 0) { writeQueue[idx] = op; persistWriteQueue(); refreshSyncLabel(); kickQueue(); return; }
   }
   writeQueue.push(op);
-  setSync("保存中…");
+  persistWriteQueue();
+  refreshSyncLabel();
   kickQueue();
 }
 function kickQueue() {
-  if (!queueRunning) { queueRunning = true; processQueue(); }
+  if (queueRunning) return;
+  if (!navigator.onLine) { refreshSyncLabel(); return; }
+  queueRunning = true;
+  processQueue();
 }
 
 // POST を1回だけ送る。ok / 明示エラー / 応答未読 を区別して返す
@@ -282,18 +506,62 @@ function reapplyQueuedOps() {
     else if (b.action === "restoreChore") { const c = choreById(b.id); if (c) c.deleted = false; }
   }
 }
+function handleWriteSuccess(op, json) {
+  if (op.body.action === "addChore" && op.tempId && json && json.id) {
+    try { replaceTempId(op.tempId, json.id); render(); } catch (e) { /* 付け替え失敗は次の同期で回復 */ }
+  }
+}
+function reconcileVerifiedOp(op, snap) {
+  if (op.body.action === "addChore" && op.tempId) {
+    const real = snap.chores.find((c) => c.name === op.body.chore.name && !c.deleted);
+    if (real && real.id !== op.tempId) replaceTempId(op.tempId, real.id);
+  }
+}
+function handleWriteFailure(op) {
+  const b = op.body;
+  if (b.action === "deleteChore" && state.lastDeleted && state.lastDeleted.id === b.id) {
+    state.lastDeleted = null;
+    document.getElementById("undoBar").classList.add("hidden");
+  }
+  if (b.action === "restoreChore" && op.undoOnFail) {
+    state.lastDeleted = op.undoOnFail;
+    document.getElementById("undoText").textContent = `「${op.undoOnFail.name}」を削除しました`;
+    document.getElementById("undoBar").classList.remove("hidden");
+  }
+}
 async function processQueue() {
   const outcomes = [];
   let verifyFailed = false;
+  let stoppedOffline = false;
   try {
     while (writeQueue.length) {
-      const op = writeQueue.shift();
-      setSync("保存中…");
-      op._result = await postWrite(op.body);
-      outcomes.push(op);
-      if (op._result.status === "ok" && op.onSuccess) {
-        try { op.onSuccess(op._result.json); } catch (e) { /* 付け替え失敗は次の同期で回復 */ }
+      if (!navigator.onLine) { stoppedOffline = true; break; }
+      const head = writeQueue[0];
+      if (head.needsVerify) {
+        const snap = await fetchServerState();
+        if (!snap) { stoppedOffline = !navigator.onLine; verifyFailed = true; break; }
+        if (verifyLanded(head, snap)) {
+          writeQueue.shift();
+          reconcileVerifiedOp(head, snap);
+          applySnap(snap);
+          reapplyQueuedOps();
+          persistStateCache();
+          persistWriteQueue();
+          render();
+          continue;
+        }
+        head.needsVerify = false;
+        persistWriteQueue();
       }
+      const op = writeQueue.shift();
+      activeWriteOp = op;
+      persistWriteQueue();
+      refreshSyncLabel();
+      op._result = await postWrite(op.body);
+      activeWriteOp = null;
+      persistWriteQueue();
+      outcomes.push(op);
+      if (op._result.status === "ok") handleWriteSuccess(op, op._result.json);
     }
     const needVerify = outcomes.some((o) => o._result.status !== "ok");
     if (needVerify) {
@@ -302,29 +570,44 @@ async function processQueue() {
         const msgs = [];
         for (const o of outcomes) {
           if (o._result.status === "ok") continue;
-          if (!verifyLanded(o, snap)) {
-            if (o.onFail) { try { o.onFail(); } catch (e) { /* noop */ } }
+          if (o._result.status === "error") {
+            handleWriteFailure(o);
             msgs.push(messageFor(o));
+          } else if (!verifyLanded(o, snap)) {
+            handleWriteFailure(o);
+            msgs.push(messageFor(o));
+          } else {
+            reconcileVerifiedOp(o, snap);
           }
         }
         applySnap(snap);
         reapplyQueuedOps();
         state.connected = true;
+        persistStateCache();
         render();
         if (msgs.length) showError(msgs[0]);
       } else {
         verifyFailed = true;
-        const explicit = outcomes.find((o) => o._result.status === "error");
-        const unknown = outcomes.find((o) => o._result.status === "unknown");
-        if (explicit) showError(messageFor(explicit));
-        else if (unknown) showError("保存できたか確認できませんでした。最新の状態を表示しています");
+        const retained = [];
+        for (const o of outcomes) {
+          if (o._result.status === "unknown") { o.needsVerify = true; retained.push(o); }
+          else if (o._result.status === "error") showError(messageFor(o));
+        }
+        if (retained.length) {
+          writeQueue.unshift(...retained);
+          persistWriteQueue();
+          if (navigator.onLine) showError("保存できたか確認できませんでした。接続が回復したら自動で確認します");
+        }
       }
     }
   } finally {
+    activeWriteOp = null;
     queueRunning = false;
-    if (writeQueue.length) kickQueue();
-    else if (verifyFailed) { state.connected = false; setSync("未接続"); }
-    else { state.connected = true; markSynced(); }
+    persistWriteQueue();
+    if (verifyFailed) state.connected = false;
+    else if (!stoppedOffline && !writeQueue.length) state.connected = true;
+    if (writeQueue.length && navigator.onLine && !verifyFailed && !stoppedOffline) kickQueue();
+    else refreshSyncLabel();
   }
 }
 // 追加した家事の仮IDを、サーバー発行の実IDへ付け替える（記録・対象・未送信操作も追随）
@@ -342,6 +625,8 @@ function replaceTempId(oldId, newId) {
     if (q.key) q.key = q.key.split(oldId).join(newId);
     if (q.localChore && q.localChore.id === oldId) q.localChore.id = newId;
   }
+  persistWriteQueue();
+  persistStateCache();
 }
 
 /* ---------- 記録・対象の操作（楽観反映 → キューで送信） ---------- */
@@ -352,10 +637,12 @@ function applyLocalRecord(date, choreId, who) {
   else state.records.push({ date, choreId, who });
 }
 function tapWho(choreId, who) {
+  checkDateRollover();
   const date = todayStr();
   const cur = recordMap().get(date + "|" + choreId) || null;
   const next = cur === who ? null : who;
   applyLocalRecord(date, choreId, next);
+  persistStateCache();
   render();
   if (next === null) {
     enqueueWrite({ key: "rec|" + date + "|" + choreId, body: { action: "clearRecord", date, choreId } });
@@ -373,7 +660,9 @@ function applyLocalTarget(choreId, on) {
   applyLocalTargetRaw(scope, key, choreId, on);
 }
 function setTarget(choreId, on) {
+  checkDateRollover();
   applyLocalTarget(choreId, on);
+  persistStateCache();
   render();
   const { scope, key } = targetKey();
   enqueueWrite({
@@ -403,13 +692,14 @@ function applyPreset() {
       });
     }
   }
+  persistStateCache();
   render();
 }
 
 /* ---------- 描画 ---------- */
 function whoButtonsHtml(chore, todayWho) {
   return WHO_LIST.map((w) =>
-    `<button type="button" class="who-btn ${todayWho === w ? "sel-" + WHO_CLASS[w] : ""}" data-act="who" data-id="${esc(chore.id)}" data-who="${w}">${w}</button>`
+    `<button type="button" class="who-btn ${todayWho === w ? "sel-" + WHO_CLASS[w] : ""}" data-act="who" data-id="${esc(chore.id)}" data-who="${w}" aria-pressed="${todayWho === w ? "true" : "false"}" aria-label="${esc(chore.name)}：${w}">${w}</button>`
   ).join("");
 }
 function shareHtml(records, totalLabel) {
@@ -464,7 +754,7 @@ function renderTargetPanel() {
     return `<div class="target-row">
       <span class="name">${esc(c.name)}<span class="badge freq">${esc(FREQ_LABEL[c.freq] || "")}</span><span class="badge ${done ? "done" : "todo"}">${done ? "完了" : "未完了"}</span></span>
       <span class="who-row" style="margin:0;flex:1 1 200px">${whoButtonsHtml(c, todayWho)}</span>
-      <button type="button" class="mini-btn" data-act="untarget" data-id="${esc(c.id)}">対象から外す</button>
+      <button type="button" class="mini-btn" data-act="untarget" data-id="${esc(c.id)}" aria-label="${esc(c.name)}を今日の対象から外す">対象から外す</button>
     </div>`;
   }).join("");
   const pct = Math.round((doneCount / items.length) * 100);
@@ -504,20 +794,20 @@ function choreCardHtml(c, freq) {
     <div class="chore-status">${esc(status)}</div>
     <div class="who-row">${whoButtonsHtml(c, todayWho)}</div>
     <div class="chore-foot">
-      <button type="button" class="foot-btn ${inTarget ? "on" : ""}" data-act="target" data-id="${esc(c.id)}">${TARGET_LABEL}${inTarget ? " ✓" : ""}</button>
-      <button type="button" class="foot-btn" data-act="steps" data-id="${esc(c.id)}">やり方${stepsOpen ? "を閉じる" : ""}</button>
+      <button type="button" class="foot-btn ${inTarget ? "on" : ""}" data-act="target" data-id="${esc(c.id)}" aria-pressed="${inTarget ? "true" : "false"}">${TARGET_LABEL}${inTarget ? " ✓" : ""}</button>
+      <button type="button" class="foot-btn" data-act="steps" data-id="${esc(c.id)}" aria-expanded="${stepsOpen ? "true" : "false"}">やり方${stepsOpen ? "を閉じる" : ""}</button>
     </div>
     ${stepsHtml}
   </div>`;
 }
 function editFormHtml(c) {
   return `<form class="edit-form" data-form="edit" data-id="${esc(c.id)}">
-    <label>名前</label><input name="name" value="${esc(c.name)}" maxlength="60" required>
-    <label>頻度</label><select name="freq">
+    <label for="edit-name-${esc(c.id)}">名前</label><input id="edit-name-${esc(c.id)}" name="name" value="${esc(c.name)}" maxlength="60" required>
+    <label for="edit-freq-${esc(c.id)}">頻度</label><select id="edit-freq-${esc(c.id)}" name="freq">
       ${Object.keys(FREQ_LABEL).map((f) => `<option value="${f}" ${c.freq === f ? "selected" : ""}>${FREQ_LABEL[f]}</option>`).join("")}
     </select>
-    <label>所要時間（分）</label><input name="minutes" type="number" min="0" max="600" step="1" value="${c.minutes || 0}">
-    <label>やり方（1行に1手順）</label><textarea name="steps" rows="5">${esc(c.steps || "")}</textarea>
+    <label for="edit-minutes-${esc(c.id)}">所要時間（分）</label><input id="edit-minutes-${esc(c.id)}" name="minutes" type="number" min="0" max="600" step="1" value="${c.minutes || 0}">
+    <label for="edit-steps-${esc(c.id)}">やり方（1行に1手順）</label><textarea id="edit-steps-${esc(c.id)}" name="steps" rows="5" maxlength="2000">${esc(c.steps || "")}</textarea>
     <div class="form-btns">
       <button type="submit" class="primary-btn">保存</button>
       <button type="button" class="plain-btn" data-act="canceledit">キャンセル</button>
@@ -551,18 +841,21 @@ function renderList(freq) {
       g.items.map((c) => choreCardHtml(c, freq)).join("")
     ).join("");
   }
-  document.querySelectorAll(`#view-${freq} .seg-btn`).forEach((b) =>
-    b.classList.toggle("active", b.dataset.mode === state.groupMode[freq]));
+  document.querySelectorAll(`#view-${freq} .seg-btn`).forEach((b) => {
+    const active = b.dataset.mode === state.groupMode[freq];
+    b.classList.toggle("active", active);
+    b.setAttribute("aria-pressed", active ? "true" : "false");
+  });
   // 追加フォーム
   const addEl = document.getElementById("add-" + freq);
   if (!state.addOpen[freq]) {
     addEl.innerHTML = `<button type="button" class="add-open-btn" data-act="addopen" data-freq="${freq}">＋ 家事を追加</button>`;
   } else {
     addEl.innerHTML = `<form class="add-form" data-form="add" data-freq="${freq}">
-      <label>家事の名前（必須）</label><input name="name" maxlength="60" required placeholder="例：浴室の鏡磨き">
-      <label>頻度</label><select name="freq">${Object.keys(FREQ_LABEL).map((f) => `<option value="${f}" ${f === freq ? "selected" : ""}>${FREQ_LABEL[f]}</option>`).join("")}</select>
-      <label>所要時間（分・任意）</label><input name="minutes" type="number" min="0" max="600" step="1" placeholder="10">
-      <label>やり方（任意・1行に1手順）</label><textarea name="steps" rows="4"></textarea>
+      <label for="add-name-${freq}">家事の名前（必須）</label><input id="add-name-${freq}" name="name" maxlength="60" required placeholder="例：浴室の鏡磨き">
+      <label for="add-freq-${freq}">頻度</label><select id="add-freq-${freq}" name="freq">${Object.keys(FREQ_LABEL).map((f) => `<option value="${f}" ${f === freq ? "selected" : ""}>${FREQ_LABEL[f]}</option>`).join("")}</select>
+      <label for="add-minutes-${freq}">所要時間（分・任意）</label><input id="add-minutes-${freq}" name="minutes" type="number" min="0" max="600" step="1" placeholder="10">
+      <label for="add-steps-${freq}">やり方（任意・1行に1手順）</label><textarea id="add-steps-${freq}" name="steps" rows="4" maxlength="2000"></textarea>
       <div class="form-btns"><button type="submit" class="primary-btn">追加する</button>
       <button type="button" class="plain-btn" data-act="addcancel" data-freq="${freq}">やめる</button></div>
       <p class="form-note">追加するとあやの画面にも表示されます。</p>
@@ -588,7 +881,7 @@ function renderHistory() {
     const inMonth = monthKeyOf(ds) === mk;
     const recs = state.records.filter((r) => r.date === ds);
     const s = shareOf(recs);
-    cells += `<button type="button" class="cal-cell ${inMonth ? "" : "out"} ${ds === t ? "today" : ""} ${ds === state.selectedDay ? "selected" : ""}" data-act="day" data-day="${ds}">
+    cells += `<button type="button" class="cal-cell ${inMonth ? "" : "out"} ${ds === t ? "today" : ""} ${ds === state.selectedDay ? "selected" : ""}" data-act="day" data-day="${ds}" aria-pressed="${ds === state.selectedDay ? "true" : "false"}" aria-label="${Number(ds.slice(5, 7))}月${Number(ds.slice(8))}日${recs.length ? "、" + recs.length + "件の記録" : "、記録なし"}">
       <div>${Number(ds.slice(8))}${ds === t ? " 今日" : ""}</div>
       ${recs.length ? `<div class="cnt">${recs.length}件</div><div class="mini-bar"><div style="width:${s.pT}%;background:var(--takuya)"></div><div style="width:${s.pA}%;background:var(--aya)"></div></div>` : ""}
     </button>`;
@@ -611,14 +904,22 @@ function renderHistory() {
   }
 }
 function renderPresets() {
-  document.getElementById("presetCook").classList.toggle("on", state.presets.meal === "cook");
-  document.getElementById("presetEatout").classList.toggle("on", state.presets.meal === "eatout");
-  document.getElementById("presetLaundry").classList.toggle("on", state.presets.laundry);
+  const cook = document.getElementById("presetCook");
+  const eatout = document.getElementById("presetEatout");
+  const laundry = document.getElementById("presetLaundry");
+  cook.classList.toggle("on", state.presets.meal === "cook");
+  cook.setAttribute("aria-pressed", state.presets.meal === "cook" ? "true" : "false");
+  eatout.classList.toggle("on", state.presets.meal === "eatout");
+  eatout.setAttribute("aria-pressed", state.presets.meal === "eatout" ? "true" : "false");
+  laundry.classList.toggle("on", state.presets.laundry);
+  laundry.setAttribute("aria-pressed", state.presets.laundry ? "true" : "false");
 }
-function render() {
-  const t = new Date();
-  document.getElementById("todayLabel").textContent =
-    `${t.getFullYear()}年${t.getMonth() + 1}月${t.getDate()}日（${"日月火水木金土"[t.getDay()]}）`;
+function render(options) {
+  const keepScroll = !options || options.keepScroll !== false;
+  const scrollY = window.scrollY || 0;
+  updateTodayLabel();
+  const versionEl = document.getElementById("appVersion");
+  if (versionEl) versionEl.textContent = "v" + APP_VERSION;
   document.getElementById("apiNotice").classList.toggle("hidden", Boolean(API_URL));
   for (const freq of ["daily", "weekly", "monthly"]) {
     document.getElementById("view-" + freq).classList.toggle("hidden", state.tab !== freq);
@@ -627,13 +928,19 @@ function render() {
   document.getElementById("view-history").classList.toggle("hidden", state.tab !== "history");
   if (state.tab === "daily") { renderShare(); renderTodayDone(); renderPresets(); renderTargetPanel(); }
   if (state.tab === "history") renderHistory();
-  document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === state.tab));
+  document.querySelectorAll(".tab").forEach((b) => {
+    const active = b.dataset.tab === state.tab;
+    b.classList.toggle("active", active);
+    b.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  window.scrollTo(0, keepScroll ? scrollY : 0);
 }
 
 /* ---------- イベント ---------- */
 document.addEventListener("click", async (e) => {
+  if (e.target.id === "retryLoadButton") { window.location.reload(); return; }
   const tabBtn = e.target.closest(".tab");
-  if (tabBtn) { state.tab = tabBtn.dataset.tab; render(); return; }
+  if (tabBtn) { state.tab = tabBtn.dataset.tab; render({ keepScroll: false }); return; }
   const seg = e.target.closest(".seg-btn");
   if (seg) {
     const view = seg.closest(".view");
@@ -670,14 +977,10 @@ document.addEventListener("click", async (e) => {
       const c = choreById(del.id);
       if (c) c.deleted = false;
       render();
+      persistStateCache();
       enqueueWrite({
         body: { action: "restoreChore", id: del.id },
-        onFail: () => {
-          // 復元できていなければ、元に戻すバーを再表示する
-          state.lastDeleted = del;
-          document.getElementById("undoText").textContent = `「${del.name}」を削除しました`;
-          document.getElementById("undoBar").classList.remove("hidden");
-        }
+        undoOnFail: del
       });
     }
     return;
@@ -699,7 +1002,7 @@ document.addEventListener("click", async (e) => {
     return;
   }
   if (act === "edit") { state.editingId = id; state.openSteps.add(id); render(); return; }
-  if (act === "canceledit") { state.editingId = null; render(); return; }
+  if (act === "canceledit") { state.editingId = null; if (!consumeDateRollover()) render(); return; }
   if (act === "del") {
     const c = choreById(id);
     if (!c) return;
@@ -709,15 +1012,9 @@ document.addEventListener("click", async (e) => {
     const bar = document.getElementById("undoBar");
     document.getElementById("undoText").textContent = `「${c.name}」を削除しました`;
     bar.classList.remove("hidden");
+    persistStateCache();
     render();
-    enqueueWrite({
-      body: { action: "deleteChore", id },
-      onFail: () => {
-        // 削除できていなければ、元に戻すバーは消す（実体は残っているため）
-        state.lastDeleted = null;
-        document.getElementById("undoBar").classList.add("hidden");
-      }
-    });
+    enqueueWrite({ body: { action: "deleteChore", id } });
     return;
   }
   if (act === "addopen") { state.addOpen[btn.dataset.freq] = true; render(); return; }
@@ -731,6 +1028,18 @@ document.addEventListener("click", async (e) => {
   }
 });
 
+function validateChoreInput(name, freq, minutesRaw, steps, fallbackMinutes) {
+  if (!name) return { error: "名前を入力してください" };
+  if (name.length > 60) return { error: "名前は60文字以内で入力してください" };
+  if (!Object.prototype.hasOwnProperty.call(FREQ_LABEL, freq)) return { error: "頻度を選んでください" };
+  if (steps.length > 2000) return { error: "やり方は2000文字以内で入力してください" };
+  if (minutesRaw === "") return { minutes: fallbackMinutes };
+  if (!/^\d+$/.test(minutesRaw)) return { error: "所要時間は0〜600の整数で入力してください" };
+  const minutes = Number(minutesRaw);
+  if (!Number.isSafeInteger(minutes) || minutes < 0 || minutes > 600) return { error: "所要時間は0〜600の整数で入力してください" };
+  return { minutes: minutes };
+}
+
 document.addEventListener("submit", async (e) => {
   const form = e.target.closest("form[data-form]");
   if (!form) return;
@@ -742,20 +1051,22 @@ document.addEventListener("submit", async (e) => {
   let minutes = minutesRaw === "" ? NaN : Number(minutesRaw);
   const steps = String(fd.get("steps") || "");
   if (form.dataset.form === "add") {
-    if (!name) { showError("名前を入力してください"); return; }
+    const checked = validateChoreInput(name, freq, minutesRaw, steps, 10);
+    if (checked.error) { showError(checked.error); return; }
+    minutes = checked.minutes;
     if (activeChores().some((c) => c.name === name)) { showError("同じ名前の家事が既にあります"); return; }
-    if (Number.isNaN(minutes) || minutes < 0) minutes = 10;
-    if (minutes > 600) minutes = 600;
     const tempId = "tmp" + Date.now().toString(36);
     const newChore = { id: tempId, name, freq, group: "", steps, minutes, custom: true, deleted: false, order: 9999 };
     state.chores.push(newChore);
     state.addOpen[form.dataset.freq] = false;
+    const tabChanged = state.tab !== freq;
     state.tab = freq;
-    render();
+    persistStateCache();
+    render({ keepScroll: !tabChanged });
     enqueueWrite({
       body: { action: "addChore", chore: { name, freq, steps, minutes } },
       localChore: newChore,
-      onSuccess: (j) => { if (j && j.id) { replaceTempId(tempId, j.id); render(); } }
+      tempId: tempId
     });
     return;
   }
@@ -763,14 +1074,18 @@ document.addEventListener("submit", async (e) => {
     const id = form.dataset.id;
     const c = choreById(id);
     if (!c) return;
-    if (!name) { showError("名前を入力してください"); return; }
-    if (Number.isNaN(minutes) || minutes < 0) minutes = c.minutes || 0;
-    if (minutes > 600) minutes = 600;
+    const checked = validateChoreInput(name, freq, minutesRaw, steps, c.minutes || 0);
+    if (checked.error) { showError(checked.error); return; }
+    minutes = checked.minutes;
+    if (activeChores().some((other) => other.id !== id && other.name === name)) { showError("同じ名前の家事が既にあります"); return; }
     const expectName = c.name;
     Object.assign(c, { name, freq, steps, minutes });
     state.editingId = null;
+    const tabChanged = state.tab !== freq;
     state.tab = freq;
-    render();
+    persistStateCache();
+    render({ keepScroll: !tabChanged });
+    consumeDateRollover();
     enqueueWrite({
       body: { action: "updateChore", id, expect: { name: expectName }, chore: { name, freq, steps, minutes } }
     });
@@ -782,17 +1097,50 @@ async function init() {
   const now = new Date();
   state.calCursor = { y: now.getFullYear(), m: now.getMonth() };
   state.selectedDay = todayStr();
+  state.currentDate = todayStr();
+  const hadCache = loadStateCache();
+  restoreWriteQueue();
+  if (writeQueue.length) reapplyQueuedOps();
   render();
-  if (await refreshFromServer({ force: true })) render();
+  if (hadCache) setLoadingState("hidden");
+  else setLoadingState("loading");
+
+  const snap = API_URL ? await fetchServerState() : null;
+  if (snap) {
+    const beforeHash = stateHash(state);
+    applySnap(snap);
+    reapplyQueuedOps();
+    state.connected = true;
+    state.hasCachedState = true;
+    persistStateCache();
+    setLoadingState("hidden");
+    refreshSyncLabel();
+    if (stateHash(state) !== beforeHash) render();
+  } else {
+    state.connected = false;
+    if (hadCache || state.chores.length) setLoadingState("hidden");
+    else setLoadingState("error");
+    refreshSyncLabel();
+  }
+  kickQueue();
+
   setInterval(async () => {
+    checkDateRollover();
     if (state.editingId) return; // 編集中は上書きしない
+    if (hasPendingOps()) { kickQueue(); return; }
     if (await refreshFromServer()) render();
   }, 15000);
+  setInterval(() => { checkDateRollover(); }, 60000);
   document.addEventListener("visibilitychange", async () => {
-    if (document.visibilityState === "visible" && !state.editingId) {
-      if (await refreshFromServer()) render();
-    }
+    if (document.visibilityState !== "visible") return;
+    checkDateRollover();
+    if (state.editingId) return;
+    if (hasPendingOps()) { kickQueue(); return; }
+    if (await refreshFromServer()) render();
   });
+  window.addEventListener("focus", () => { checkDateRollover(); });
+  window.addEventListener("online", () => { refreshSyncLabel(); kickQueue(); });
+  window.addEventListener("offline", () => { refreshSyncLabel(); });
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("./service-worker.js").catch(() => {});
   }
