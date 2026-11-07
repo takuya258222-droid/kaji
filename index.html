@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>家事</title>
+<meta name="description" content="彼女と共有する家事アプリ。やった人を1タップで記録して、分担を見える化。">
+<link rel="manifest" href="./manifest.json">
+<link rel="icon" href="./icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="./icon.svg">
+<meta name="theme-color" content="#2f7d5c">
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<header class="app-header">
+  <div>
+    <h1>家事</h1>
+    <p id="todayLabel" class="today-label"></p>
+  </div>
+  <div id="syncStatus" class="sync-status" title="同期状態">…</div>
+</header>
+
+<div id="apiNotice" class="notice hidden">API未設定です。Apps ScriptのURLを設定すると保存・同期が有効になります。</div>
+<div id="errorBar" class="error-bar hidden"></div>
+<div id="undoBar" class="undo-bar hidden"><span id="undoText"></span><button id="undoButton" type="button">元に戻す</button></div>
+
+<nav class="tabs" id="tabs">
+  <button type="button" data-tab="daily" class="tab active">毎日</button>
+  <button type="button" data-tab="weekly" class="tab">週1回</button>
+  <button type="button" data-tab="monthly" class="tab">月1回くらい</button>
+  <button type="button" data-tab="history" class="tab">履歴</button>
+</nav>
+
+<main>
+  <!-- 今日（毎日） -->
+  <section id="view-daily" class="view">
+    <div class="card target-card">
+      <h2>今日の対象</h2>
+      <div class="preset-row">
+        <span class="preset-label">今日は：</span>
+        <button type="button" class="chip" id="presetCook">自炊の日</button>
+        <button type="button" class="chip" id="presetEatout">外食の日</button>
+        <button type="button" class="chip" id="presetLaundry">洗濯する日</button>
+      </div>
+      <div id="target-daily"></div>
+    </div>
+
+    <div class="card">
+      <h2>今日やった家事</h2>
+      <div id="todayDoneBody"></div>
+    </div>
+
+    <div class="card" id="shareCard">
+      <h2>今月の分担</h2>
+      <div id="shareBody"></div>
+    </div>
+
+    <div class="list-head">
+      <h2>毎日の家事</h2>
+      <div class="seg">
+        <button type="button" data-mode="freq" class="seg-btn active">頻度別</button>
+        <button type="button" data-mode="time" class="seg-btn">時間別</button>
+      </div>
+    </div>
+    <div id="list-daily"></div>
+    <div id="add-daily"></div>
+  </section>
+
+  <!-- 週1回 -->
+  <section id="view-weekly" class="view hidden">
+    <div class="list-head">
+      <h2>週1回の家事</h2>
+      <div class="seg">
+        <button type="button" data-mode="freq" class="seg-btn active">頻度別</button>
+        <button type="button" data-mode="time" class="seg-btn">時間別</button>
+      </div>
+    </div>
+    <div id="list-weekly"></div>
+    <div id="add-weekly"></div>
+  </section>
+
+  <!-- 月1回くらい -->
+  <section id="view-monthly" class="view hidden">
+    <div class="list-head">
+      <h2>月1回くらいの家事</h2>
+      <div class="seg">
+        <button type="button" data-mode="freq" class="seg-btn active">頻度別</button>
+        <button type="button" data-mode="time" class="seg-btn">時間別</button>
+      </div>
+    </div>
+    <div id="list-monthly"></div>
+    <div id="add-monthly"></div>
+  </section>
+
+  <!-- 履歴 -->
+  <section id="view-history" class="view hidden">
+    <div class="card">
+      <div class="cal-head">
+        <button type="button" id="calPrev">‹ 前月</button>
+        <h2 id="calTitle"></h2>
+        <button type="button" id="calNext">翌月 ›</button>
+      </div>
+      <div id="monthShare"></div>
+      <div class="cal-week"><span>日</span><span>月</span><span>火</span><span>水</span><span>木</span><span>金</span><span>土</span></div>
+      <div id="calendar" class="cal-grid"></div>
+    </div>
+    <div class="card">
+      <h2 id="dayDetailTitle">日を選んでください</h2>
+      <div id="dayDetail"></div>
+    </div>
+  </section>
+</main>
+
+<footer class="app-footer">記録は自動で保存され、あやと同期されます。</footer>
+
+<script src="./app.js"></script>
+</body>
+</html>
