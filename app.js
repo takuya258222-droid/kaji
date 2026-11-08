@@ -2,7 +2,7 @@
 
 // Apps Script ウェブアプリの URL（家事API v2）
 const API_URL = "https://script.google.com/macros/s/AKfycbx91iMFxq6gxpFuIsZR9Ok93ZZrH4DRrCWrRYhKuRk9QWLlpyX8YUDJKBdGaBXC-mi7ZA/exec";
-const APP_VERSION = "1.5";
+const APP_VERSION = "1.6";
 const STATE_CACHE_KEY = "kaji_state_cache_v1";
 const WRITE_QUEUE_KEY = "kaji_write_queue_v1";
 
@@ -105,9 +105,6 @@ function recordMap() {
 }
 // 対象は scope=day・key=対象の日付 で持つ。key=今日 のものが「今日やること」で、
 // 先の日付に設定したものは、その日の予定として当日になると自動で今日の対象になる
-function targetKey() {
-  return { scope: "day", key: todayStr() };
-}
 function targetSetFor(dateStr) {
   const set = new Set();
   for (const t of state.targets) if (t.scope === "day" && t.key === dateStr) set.add(t.choreId);
@@ -676,10 +673,6 @@ function applyLocalTargetRaw(scope, key, choreId, on) {
   if (on && idx < 0) state.targets.push({ scope, key, choreId });
   if (!on && idx >= 0) state.targets.splice(idx, 1);
 }
-function applyLocalTarget(choreId, on) {
-  const { scope, key } = targetKey();
-  applyLocalTargetRaw(scope, key, choreId, on);
-}
 // 任意の日付の対象を付け外しする。今日は「今日やること」、未来日はその日の予定として保存され、
 // 当日になると今日の対象にそのまま現れる。過去日の対象は表示専用なのでここでは変更しない
 function setTargetFor(dateStr, choreId, on) {
@@ -1158,6 +1151,7 @@ async function init() {
 
   setInterval(async () => {
     checkDateRollover();
+    if (document.hidden) return; // 非表示の間は取得しない（復帰時に visibilitychange で取得する）
     if (state.editingId) return; // 編集中は上書きしない
     if (hasPendingOps()) { kickQueue(); return; }
     if (await refreshFromServer()) render();

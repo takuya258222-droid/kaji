@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_NAME = "kaji-app-v8";
+const CACHE_NAME = "kaji-app-v9";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -9,6 +9,8 @@ const APP_SHELL = [
   "./manifest.json",
   "./icon.svg"
 ];
+// 静的アセットは stale-while-revalidate（キャッシュを即返し、裏で最新に差し替える）
+const SWR_ASSETS = ["styles.css", "app.js", "manifest.json", "icon.svg"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -34,7 +36,31 @@ self.addEventListener("fetch", (event) => {
   // 共有API（別ドメイン）はキャッシュしない
   if (url.origin !== self.location.origin) return;
 
-  // 同一ドメインは常にネットワーク優先（アプリ更新をすぐ反映し、オフライン時のみキャッシュ）
+  const isAsset = SWR_ASSETS.some((name) => url.pathname.endsWith("/" + name));
+  if (isAsset) {
+    // stale-while-revalidate：キャッシュがあれば即返し、裏で取得してキャッシュを更新する。
+    // キャッシュが無い初回だけネットワークを待つ
+    event.respondWith(
+      caches.match(request).then((cached) => {
+        const network = fetch(request)
+          .then((response) => {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+            return response;
+          })
+          .catch(() => cached);
+        if (cached) {
+          event.waitUntil(network.catch(() => {}));
+          return cached;
+        }
+        return network;
+      })
+    );
+    return;
+  }
+
+  // ページ本体（ナビゲーション／index.html）はネットワーク優先で版の不整合を防ぎ、
+  // オフライン時のみキャッシュへフォールバックする
   event.respondWith(
     fetch(request)
       .then((response) => {
