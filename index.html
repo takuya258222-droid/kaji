@@ -27,6 +27,7 @@
 
 <div id="apiNotice" class="notice hidden">API未設定です。Apps ScriptのURLを設定すると保存・同期が有効になります。</div>
 <div id="errorBar" class="error-bar hidden" role="alert"></div>
+<div id="noticeBar" class="notice-bar hidden" role="status"></div>
 <div id="undoBar" class="undo-bar hidden"><span id="undoText"></span><button id="undoButton" type="button">元に戻す</button></div>
 
 <nav class="tabs" id="tabs" role="tablist" aria-label="表示切り替え">
@@ -88,11 +89,12 @@
     <div class="card">
       <h2 id="dayDetailTitle">日を選んでください</h2>
       <div id="dayDetail"></div>
+      <div id="dayTargetSection"></div>
     </div>
   </section>
 </main>
 
-<footer class="app-footer">家事アプリ <span id="appVersion">v1.4</span>｜記録は自動で保存され、あやと同期されます。</footer>
+<footer class="app-footer">家事アプリ <span id="appVersion">v1.5</span>｜記録は自動で保存され、あやと同期されます。</footer>
 
 <script src="./app.js"></script>
 </body>

@@ -30,6 +30,7 @@ body {
 .sync-status { font-size: 12px; background: rgba(255,255,255,.18); padding: 4px 10px; border-radius: 999px; white-space: nowrap; flex: none; margin-left: 8px; }
 .notice { margin: 12px 16px 0; padding: 10px 12px; background: #fff3cd; border: 1px solid #e6cf7a; border-radius: 10px; font-size: 13px; }
 .error-bar { margin: 12px 16px 0; padding: 10px 12px; background: #fdecec; border: 1px solid #f0b4b4; color: var(--danger); border-radius: 10px; font-size: 13px; }
+.notice-bar { margin: 12px 16px 0; padding: 10px 12px; background: #e8f4ec; border: 1px solid #bfe0cc; color: var(--green-dark); border-radius: 10px; font-size: 13px; font-weight: 600; }
 .undo-bar { margin: 12px 16px 0; padding: 8px 12px; background: #2d3748; color: #fff; border-radius: 10px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
 .undo-bar button { background: #fff; color: #2d3748; border: 0; border-radius: 8px; padding: 6px 12px; font-weight: 700; }
 .hidden { display: none !important; }
@@ -128,6 +129,19 @@ main { padding: 12px 16px 24px; max-width: 640px; margin: 0 auto; }
 .mini-bar > div { height: 100%; }
 .day-row { display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; }
 
+/* ---------- この日の対象（履歴の日別詳細：先の予定） ---------- */
+.cal-cell .plan { font-size: 10px; color: var(--green-dark); font-weight: 700; margin-top: 2px; white-space: nowrap; }
+.plan-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--green); margin-right: 3px; vertical-align: 1px; }
+.day-target { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+.day-target h3 { margin: 0 0 8px; font-size: 15px; }
+.pick-note { font-size: 12px; color: var(--muted); margin: 10px 0 2px; }
+.pick-group { font-size: 13px; color: var(--muted); font-weight: 700; margin: 12px 0 2px; }
+.pick-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--line); }
+.pick-row .name { flex: 1; min-width: 0; font-size: 14px; overflow-wrap: anywhere; }
+.pick-row .chore-min { margin-left: 6px; }
+.pick-btn { flex: none; min-width: 76px; font-weight: 700; color: var(--green-dark); border-color: var(--green); }
+.pick-btn.on { background: var(--green); border-color: var(--green); color: #fff; }
+
 .app-footer { text-align: center; color: var(--muted); font-size: 12px; padding: 0 16px 28px; }
 
 /* ---------- スマホ最適化（主対象: iPhone 幅390px前後） ---------- */
@@ -160,7 +174,7 @@ main { padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16
   .cal-cell .cnt { font-size: 10px; }
   .cal-grid { gap: 3px; }
   .list-head { flex-wrap: wrap; gap: 8px; }
-  .notice, .error-bar, .undo-bar { margin-left: 12px; margin-right: 12px; }
+  .notice, .error-bar, .notice-bar, .undo-bar { margin-left: 12px; margin-right: 12px; }
 }
 
 /* ---------- 家事一覧セクション（v1.4：今日画面に統合） ---------- */

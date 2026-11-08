@@ -2,7 +2,7 @@
 
 // Apps Script ウェブアプリの URL（家事API v2）
 const API_URL = "https://script.google.com/macros/s/AKfycbx91iMFxq6gxpFuIsZR9Ok93ZZrH4DRrCWrRYhKuRk9QWLlpyX8YUDJKBdGaBXC-mi7ZA/exec";
-const APP_VERSION = "1.4";
+const APP_VERSION = "1.5";
 const STATE_CACHE_KEY = "kaji_state_cache_v1";
 const WRITE_QUEUE_KEY = "kaji_write_queue_v1";
 
@@ -103,15 +103,18 @@ function recordMap() {
   for (const r of state.records) map.set(r.date + "|" + r.choreId, r.who);
   return map;
 }
-// 対象は scope=day・key=今日 のみ使う（週・月スコープは使わない）
+// 対象は scope=day・key=対象の日付 で持つ。key=今日 のものが「今日やること」で、
+// 先の日付に設定したものは、その日の予定として当日になると自動で今日の対象になる
 function targetKey() {
   return { scope: "day", key: todayStr() };
 }
-function targetSet() {
-  const { scope, key } = targetKey();
+function targetSetFor(dateStr) {
   const set = new Set();
-  for (const t of state.targets) if (t.scope === scope && t.key === key) set.add(t.choreId);
+  for (const t of state.targets) if (t.scope === "day" && t.key === dateStr) set.add(t.choreId);
   return set;
+}
+function targetSet() {
+  return targetSetFor(todayStr());
 }
 function periodRange(freq) {
   const t = todayStr();
@@ -170,6 +173,8 @@ function finishDateRollover(previous) {
     state.calCursor = { y: now.getFullYear(), m: now.getMonth() };
   }
   render();
+  const d = parseDate(current);
+  showNotice(`日付が変わりました。${d.getMonth() + 1}/${d.getDate()}の表示に切り替えました`);
 }
 function checkDateRollover() {
   const current = todayStr();
@@ -299,6 +304,14 @@ function showError(msg) {
   bar.classList.remove("hidden");
   clearTimeout(showError._t);
   showError._t = setTimeout(() => bar.classList.add("hidden"), 6000);
+}
+function showNotice(msg) {
+  const bar = document.getElementById("noticeBar");
+  if (!bar) return;
+  bar.textContent = msg;
+  bar.classList.remove("hidden");
+  clearTimeout(showNotice._t);
+  showNotice._t = setTimeout(() => bar.classList.add("hidden"), 8000);
 }
 
 // サーバー状態の取得だけを行い、正規化したスナップショットを返す（ローカル状態は触らない）
@@ -667,16 +680,22 @@ function applyLocalTarget(choreId, on) {
   const { scope, key } = targetKey();
   applyLocalTargetRaw(scope, key, choreId, on);
 }
-function setTarget(choreId, on) {
+// 任意の日付の対象を付け外しする。今日は「今日やること」、未来日はその日の予定として保存され、
+// 当日になると今日の対象にそのまま現れる。過去日の対象は表示専用なのでここでは変更しない
+function setTargetFor(dateStr, choreId, on) {
   checkDateRollover();
-  applyLocalTarget(choreId, on);
+  const date = dateStr || todayStr();
+  if (date < todayStr()) return;
+  applyLocalTargetRaw("day", date, choreId, on);
   persistStateCache();
   render();
-  const { scope, key } = targetKey();
   enqueueWrite({
-    key: "tgt|" + scope + "|" + key + "|" + choreId,
-    body: { action: "setTarget", scope, key, choreId, on }
+    key: "tgt|day|" + date + "|" + choreId,
+    body: { action: "setTarget", scope: "day", key: date, choreId, on }
   });
+}
+function setTarget(choreId, on) {
+  setTargetFor(null, choreId, on);
 }
 
 
@@ -868,9 +887,11 @@ function renderHistory() {
     const inMonth = monthKeyOf(ds) === mk;
     const recs = state.records.filter((r) => r.date === ds);
     const s = shareOf(recs);
-    cells += `<button type="button" class="cal-cell ${inMonth ? "" : "out"} ${ds === t ? "today" : ""} ${ds === state.selectedDay ? "selected" : ""}" data-act="day" data-day="${ds}" aria-pressed="${ds === state.selectedDay ? "true" : "false"}" aria-label="${Number(ds.slice(5, 7))}月${Number(ds.slice(8))}日${recs.length ? "、" + recs.length + "件の記録" : "、記録なし"}">
+    const planCount = targetSetFor(ds).size;
+    cells += `<button type="button" class="cal-cell ${inMonth ? "" : "out"} ${ds === t ? "today" : ""} ${ds === state.selectedDay ? "selected" : ""}" data-act="day" data-day="${ds}" aria-pressed="${ds === state.selectedDay ? "true" : "false"}" aria-label="${Number(ds.slice(5, 7))}月${Number(ds.slice(8))}日${recs.length ? "、" + recs.length + "件の記録" : "、記録なし"}${planCount ? "、予定" + planCount + "件" : ""}">
       <div>${Number(ds.slice(8))}${ds === t ? " 今日" : ""}</div>
       ${recs.length ? `<div class="cnt">${recs.length}件</div><div class="mini-bar"><div style="width:${s.pT}%;background:var(--takuya)"></div><div style="width:${s.pA}%;background:var(--aya)"></div></div>` : ""}
+      ${planCount ? `<div class="plan"><span class="plan-dot"></span>予定${planCount}件</div>` : ""}
     </button>`;
     if (i >= 35 && monthKeyOf(addDays(startDate, i + 1)) !== mk && new Date(y, m + 1, 0).getDate() + startDow <= i + 1) break;
   }
@@ -889,6 +910,57 @@ function renderHistory() {
       return `<div class="day-row"><span>${esc(c ? c.name : "(削除済み)")}</span><span class="badge ${WHO_CLASS[r.who]}">${esc(r.who)}</span></div>`;
     }).join("");
   }
+  renderDayTargets();
+}
+// 履歴の日別詳細：「この日の対象」。未来日と今日は予定として編集でき、過去日は表示のみ。
+// 今日の分は「今日」画面の「今日やること」と同じデータ（どちらで変えても即連動する）
+function renderDayTargets() {
+  const el = document.getElementById("dayTargetSection");
+  if (!el) return;
+  const ds = state.selectedDay;
+  const t = todayStr();
+  const editable = ds >= t;
+  const set = targetSetFor(ds);
+  const items = activeChores().filter((c) => set.has(c.id));
+  const map = recordMap();
+  const d = parseDate(ds);
+  const dayLabel = `${d.getMonth() + 1}/${d.getDate()}`;
+  let html = `<div class="day-target"><h3>この日の対象${ds > t ? "（予定）" : ""}</h3>`;
+  if (!items.length) {
+    html += `<p class="empty-note">${editable ? "まだ設定されていません。下の一覧から、この日にやる家事を選んでください。" : "この日の対象は設定されていませんでした"}</p>`;
+  } else {
+    let doneCount = 0, totalMin = 0;
+    const rows = items.map((c) => {
+      const who = map.get(ds + "|" + c.id) || null;
+      const done = Boolean(who);
+      if (done) doneCount += 1;
+      totalMin += c.minutes || 0;
+      return `<div class="target-row">
+        <span class="name">${esc(c.name)}<span class="badge freq">${esc(FREQ_LABEL[c.freq] || "")}</span><span class="badge ${done ? "done" : "todo"}">${done ? "完了" : "未完了"}</span>${who ? `<span class="badge ${WHO_CLASS[who]}">${esc(who)}</span>` : ""}</span>
+        ${editable ? `<button type="button" class="mini-btn" data-act="dayuntarget" data-day="${ds}" data-id="${esc(c.id)}" aria-label="${esc(c.name)}を${dayLabel}の対象から外す">外す</button>` : ""}
+      </div>`;
+    }).join("");
+    const pct = Math.round((doneCount / items.length) * 100);
+    html += `<div class="target-meta">対象 ${items.length}件中 ${doneCount}件完了 ｜ 合計 約${totalMin}分</div>
+      <div class="progress"><div style="width:${pct}%"></div></div>` + rows;
+  }
+  if (editable) {
+    html += `<p class="pick-note">${ds === t ? "今日の対象は「今日」画面の「今日やること」と連動しています。" : "先に選んでおくと、当日になると「今日やること」にそのまま出ます。"}</p>`;
+    for (const freq of ["daily", "weekly", "monthly"]) {
+      const group = activeChores(freq);
+      if (!group.length) continue;
+      html += `<div class="pick-group">${esc(FREQ_LABEL[freq])}</div>`;
+      html += group.map((c) => {
+        const on = set.has(c.id);
+        return `<div class="pick-row">
+          <span class="name">${esc(c.name)}<span class="chore-min">約${c.minutes || 10}分</span></span>
+          <button type="button" class="mini-btn pick-btn ${on ? "on" : ""}" data-act="daytarget" data-day="${ds}" data-id="${esc(c.id)}" aria-pressed="${on ? "true" : "false"}" aria-label="${esc(c.name)}を${dayLabel}の対象から${on ? "外す" : "入れる"}">${on ? "✓ 対象" : "＋ 入れる"}</button>
+        </div>`;
+      }).join("");
+    }
+  }
+  html += `</div>`;
+  el.innerHTML = html;
 }
 function render(options) {
   const keepScroll = !options || options.keepScroll !== false;
@@ -949,6 +1021,8 @@ document.addEventListener("click", async (e) => {
     return;
   }
   if (act === "untarget") { await setTarget(id, false); return; }
+  if (act === "daytarget") { await setTargetFor(btn.dataset.day, id, !targetSetFor(btn.dataset.day).has(id)); return; }
+  if (act === "dayuntarget") { await setTargetFor(btn.dataset.day, id, false); return; }
   if (act === "steps") {
     if (state.openSteps.has(id)) state.openSteps.delete(id); else state.openSteps.add(id);
     if (state.editingId === id) state.editingId = null;
