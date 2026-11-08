@@ -2,7 +2,7 @@
 
 // Apps Script ウェブアプリの URL（家事API v2）
 const API_URL = "https://script.google.com/macros/s/AKfycbx91iMFxq6gxpFuIsZR9Ok93ZZrH4DRrCWrRYhKuRk9QWLlpyX8YUDJKBdGaBXC-mi7ZA/exec";
-const APP_VERSION = "1.2";
+const APP_VERSION = "1.3";
 const STATE_CACHE_KEY = "kaji_state_cache_v1";
 const WRITE_QUEUE_KEY = "kaji_write_queue_v1";
 
@@ -14,34 +14,50 @@ function storageRemove(key) { try { window.localStorage.removeItem(key); } catch
 const WHO_LIST = ["卓也", "あや", "ふたりで"];
 const WHO_CLASS = { "卓也": "takuya", "あや": "aya", "ふたりで": "both" };
 const FREQ_LABEL = { daily: "毎日", weekly: "週1回", monthly: "月1回くらい" };
-// 対象リストは「今日の対象」1つだけ（仕様訂正 2026-11-07）。週1回・月1回の家事も今日の対象に入る
-const TARGET_LABEL = "今日の対象";
-const DAILY_GROUPS = [
-  ["everyday", "ほぼ毎日"],
-  ["cook", "自炊の日"],
-  ["eatout", "外食の日"],
-  ["laundry", "洗濯の日"],
-  ["stock", "溜まったら"],
-  ["", "その他"]
+// 対象リストは「今日のタスク」1つだけ（仕様訂正 2026-11-07）。週1回・月1回の家事も今日のタスクに入る
+const TARGET_LABEL = "今日のタスク";
+// 選択画面の項目別フィルタ用カテゴリ（スキーマは変えず、ID対応表＋名前キーワードで振り分ける）
+const CATEGORIES = [
+  ["kitchen", "キッチン"],
+  ["water", "水回り"],
+  ["laundry", "洗濯"],
+  ["living", "リビング・部屋"],
+  ["other", "ゴミ・その他"]
 ];
-const TIME_BANDS = [
-  [0, 5, "〜5分（サクッと）"],
-  [6, 10, "6〜10分"],
-  [11, 20, "11〜20分"],
-  [21, Infinity, "21分〜（しっかり）"]
+const CATEGORY_BY_ID = {
+  "d-dishes": "kitchen", "d-stove": "kitchen", "m-rangehood": "kitchen",
+  "d-washstand": "water", "w-toilet": "water", "w-bath": "water", "m-drain": "water",
+  "d-laundry-run": "laundry", "d-laundry-hang": "laundry", "d-laundry-fold": "laundry", "w-sheets": "laundry", "m-washer": "laundry",
+  "d-living": "living", "w-vacuum": "living", "w-floor": "living", "m-filter": "living",
+  "d-bunbetsu": "other", "d-trash": "other"
+};
+const CATEGORY_KEYWORDS = [
+  ["laundry", ["洗濯", "シーツ", "枕カバー"]],
+  ["kitchen", ["食器", "コンロ", "シンク", "レンジフード", "キッチン", "台所"]],
+  ["water", ["洗面", "トイレ", "お風呂", "風呂", "浴室", "排水口", "鏡", "水回り"]],
+  ["living", ["リビング", "掃除機", "床", "エアコン", "部屋", "窓", "テーブル"]],
+  ["other", ["ゴミ"]]
 ];
+function categoryOf(c) {
+  if (CATEGORY_BY_ID[c.id]) return CATEGORY_BY_ID[c.id];
+  const name = c.name || "";
+  for (const [cat, words] of CATEGORY_KEYWORDS) {
+    if (words.some((w) => name.includes(w))) return cat;
+  }
+  return "other";
+}
 
 const state = {
-  pin: storageGet("kaji_pin") || "",
   connected: false,
   chores: [],
   records: [], // {date, choreId, who}
   targets: [], // {scope, key, choreId}
-  tab: "today", // "today" | "history" の2ビュー
-  groupMode: "freq", // 全家事リスト全体に対する表示切替: "freq" | "time"
+  tab: "today", // "today" | "picker" | "history"
   openSteps: new Set(),
   editingId: null,
-  addOpen: { daily: false, weekly: false, monthly: false, any: false },
+  addOpen: { any: false },
+  pickerSearch: "",
+  pickerCat: "all",
   presets: { meal: null, laundry: false }, // meal: "cook"|"eatout"|null
   calCursor: null, // {y, m}
   selectedDay: null, // yyyy-MM-dd
@@ -291,15 +307,9 @@ function showError(msg) {
 async function fetchServerState() {
   if (!API_URL) { state.connected = false; return null; }
   try {
-    const res = await fetch(API_URL + "?action=state&pin=" + encodeURIComponent(state.pin) + "&ts=" + Date.now());
+    const res = await fetch(API_URL + "?action=state&ts=" + Date.now());
     const j = await res.json();
-    if (!j || !j.ok) {
-      if (j && j.error === "unauthorized") {
-        const pin = window.prompt("合言葉を入力してください");
-        if (pin) { state.pin = pin; storageSet("kaji_pin", pin); return fetchServerState(); }
-      }
-      return null;
-    }
+    if (!j || !j.ok) return null;
     return sanitizeSnapshot(j);
   } catch (e) {
     return null;
@@ -446,7 +456,7 @@ async function postWrite(body) {
     const res = await fetch(API_URL, {
       method: "POST",
       headers: { "Content-Type": "text/plain" },
-      body: JSON.stringify(Object.assign({}, body, { pin: state.pin }))
+      body: JSON.stringify(body)
     });
     const j = await res.json();
     if (j && j.ok) return { status: "ok", json: j };
@@ -739,7 +749,7 @@ function renderTargetPanel() {
   // 頻度を問わず、今日の対象に選んだ全家事が対象（毎日／週1回／月1回すべて）
   const items = activeChores().filter((c) => set.has(c.id));
   if (!items.length) {
-    el.innerHTML = `<p class="empty-note">対象が選ばれていません。各家事の「${TARGET_LABEL}」ボタンで入れてください（週1回・月1回の家事も入れられます）。</p>`;
+    el.innerHTML = `<p class="empty-note">まだ選ばれていません。下の「＋ タスクを選ぶ」から、今日やる家事を選んでください（週1回・月1回の家事も選べます）。</p>`;
     return;
   }
   const map = recordMap();
@@ -754,14 +764,14 @@ function renderTargetPanel() {
     return `<div class="target-row">
       <span class="name">${esc(c.name)}<span class="badge freq">${esc(FREQ_LABEL[c.freq] || "")}</span><span class="badge ${done ? "done" : "todo"}">${done ? "完了" : "未完了"}</span></span>
       <span class="who-row" style="margin:0;flex:1 1 200px">${whoButtonsHtml(c, todayWho)}</span>
-      <button type="button" class="mini-btn" data-act="untarget" data-id="${esc(c.id)}" aria-label="${esc(c.name)}を今日の対象から外す">対象から外す</button>
+      <button type="button" class="mini-btn" data-act="untarget" data-id="${esc(c.id)}" aria-label="${esc(c.name)}を今日のタスクから外す">外す</button>
     </div>`;
   }).join("");
   const pct = Math.round((doneCount / items.length) * 100);
-  el.innerHTML = `<div class="target-meta">対象 ${items.length}件中 ${doneCount}件完了 ｜ 合計見込み 約${totalMin}分（残り 約${restMin}分）</div>
+  el.innerHTML = `<div class="target-meta">${TARGET_LABEL} ${items.length}件中 ${doneCount}件完了 ｜ 合計 約${totalMin}分（残り 約${restMin}分）</div>
     <div class="progress"><div style="width:${pct}%"></div></div>` + rows;
 }
-function choreCardHtml(c) {
+function pickerRowHtml(c) {
   const freq = c.freq;
   const t = todayStr();
   const todayWho = recordMap().get(t + "|" + c.id) || null;
@@ -787,16 +797,15 @@ function choreCardHtml(c) {
         ${c.custom ? `<button type="button" class="danger-btn" data-act="del" data-id="${esc(c.id)}">この家事を削除</button>` : ""}</div></div>`;
     }
   }
-  return `<div class="chore ${rec ? "done" : ""}" data-card="${esc(c.id)}">
+  return `<div class="chore picker-row ${inTarget ? "selected" : ""} ${rec ? "done" : ""}" data-card="${esc(c.id)}">
     <div class="chore-top"><span class="chore-name">${esc(c.name)}</span>
+      <span class="badge freq">${esc(FREQ_LABEL[freq] || "")}</span>
       <span class="chore-min">約${c.minutes || 10}分</span>
-      ${state.groupMode === "time" ? `<span class="badge freq">${esc(FREQ_LABEL[freq] || "")}</span>` : ""}
       ${c.custom ? `<span class="custom-badge">追加</span>` : ""}
       ${rec ? `<span class="badge done">✓完了</span>` : ""}</div>
     <div class="chore-status">${esc(status)}</div>
-    <div class="who-row">${whoButtonsHtml(c, todayWho)}</div>
     <div class="chore-foot">
-      <button type="button" class="foot-btn ${inTarget ? "on" : ""}" data-act="target" data-id="${esc(c.id)}" aria-pressed="${inTarget ? "true" : "false"}">${TARGET_LABEL}${inTarget ? " ✓" : ""}</button>
+      <button type="button" class="foot-btn toggle-btn ${inTarget ? "on" : ""}" data-act="target" data-id="${esc(c.id)}" aria-pressed="${inTarget ? "true" : "false"}">${inTarget ? "✓ 選択中（外す）" : "＋ 選ぶ"}</button>
       <button type="button" class="foot-btn" data-act="steps" data-id="${esc(c.id)}" aria-expanded="${stepsOpen ? "true" : "false"}">やり方${stepsOpen ? "を閉じる" : ""}</button>
     </div>
     ${stepsHtml}
@@ -817,30 +826,9 @@ function editFormHtml(c) {
     <p class="form-note">保存するとあやの画面にも反映されます。</p>
   </form>`;
 }
-// 頻度別表示のときの、頻度ごとの小グループ（毎日だけ発生条件で分ける）
-function groupedChores(freq) {
-  const items = activeChores(freq);
-  if (freq === "daily") {
-    return DAILY_GROUPS.map(([key, label]) => ({
-      label,
-      items: items.filter((c) => (c.group || "") === key)
-    })).filter((g) => g.items.length);
-  }
-  return [{ label: "", items }];
-}
-function mdLabel(s) { return Number(s.slice(5, 7)) + "/" + Number(s.slice(8, 10)); }
-// セクション見出し：名前＋期間の状態（範囲と完了数）
+// セクション見出し：名前＋補足
 function sectionHeadHtml(title, meta) {
   return `<div class="section-head"><span class="section-title">${esc(title)}</span><span class="section-meta">${esc(meta)}</span></div>`;
-}
-function freqSectionHead(freq) {
-  const items = activeChores(freq);
-  const done = items.filter((c) => periodRecord(c.id, freq)).length;
-  let meta;
-  if (freq === "daily") meta = `今日 ・ ${done}/${items.length}件完了`;
-  else if (freq === "weekly") { const [f, t] = periodRange(freq); meta = `今週 ${mdLabel(f)}〜${mdLabel(t)} ・ ${done}/${items.length}件完了`; }
-  else meta = `${new Date().getMonth() + 1}月 ・ ${done}/${items.length}件完了`;
-  return sectionHeadHtml(FREQ_LABEL[freq], meta);
 }
 // 追加ボタン／追加フォーム（key は addOpen のキー、defaultFreq は頻度の初期選択）
 function fillAddForm(el, key, defaultFreq) {
@@ -859,45 +847,38 @@ function fillAddForm(el, key, defaultFreq) {
     <p class="form-note">追加するとあやの画面にも表示されます。</p>
   </form>`;
 }
-// 全家事リスト：頻度別なら頻度セクション、時間別なら時間帯セクションで全家事を並べる
-function renderChoreSections() {
-  const wrap = document.getElementById("choreSections");
-  if (!wrap) return;
-  document.querySelectorAll("#view-today .seg-btn").forEach((b) => {
-    const active = b.dataset.mode === state.groupMode;
-    b.classList.toggle("active", active);
+// 選択画面：検索＋項目チップで絞り込み、カテゴリ別に見出し表示。各行のトグルで今日のタスクへ出し入れする
+function renderPicker() {
+  document.querySelectorAll(".picker-chip").forEach((b) => {
+    const active = b.dataset.cat === state.pickerCat;
+    b.classList.toggle("on", active);
     b.setAttribute("aria-pressed", active ? "true" : "false");
   });
+  const set = targetSet();
+  const selected = activeChores().filter((c) => set.has(c.id));
+  const totalMin = selected.reduce((sum, c) => sum + (c.minutes || 0), 0);
+  const sumEl = document.getElementById("pickerSummary");
+  if (sumEl) sumEl.textContent = `選択中 ${selected.length}件・合計約${totalMin}分`;
+  const wrap = document.getElementById("pickerList");
+  if (!wrap) return;
+  const q = state.pickerSearch.trim();
+  let items = activeChores();
+  if (state.pickerCat !== "all") items = items.filter((c) => categoryOf(c) === state.pickerCat);
+  if (q) items = items.filter((c) => c.name.includes(q));
   let html = "";
-  const addSlots = [];
-  if (state.groupMode === "time") {
-    const items = activeChores();
-    if (!items.length) html += `<p class="empty-note">家事がありません</p>`;
-    for (const [lo, hi, label] of TIME_BANDS) {
-      const band = items.filter((c) => { const m = c.minutes || 10; return m >= lo && m <= hi; });
-      if (!band.length) continue;
-      html += sectionHeadHtml(label, band.length + "件");
-      html += band.map((c) => choreCardHtml(c)).join("");
-    }
-    html += `<div id="add-any"></div>`;
-    addSlots.push(["add-any", "any", "daily"]);
+  if (!items.length) {
+    html += `<p class="empty-note">見つかりませんでした。検索のことばや項目を変えてみてください。</p>`;
   } else {
-    for (const freq of ["daily", "weekly", "monthly"]) {
-      html += freqSectionHead(freq);
-      const groups = groupedChores(freq);
-      if (!groups.length) html += `<p class="empty-note">家事がありません</p>`;
-      else {
-        html += groups.map((g) =>
-          (g.label ? `<div class="group-title">${esc(g.label)}</div>` : "") +
-          g.items.map((c) => choreCardHtml(c)).join("")
-        ).join("");
-      }
-      html += `<div id="add-${freq}"></div>`;
-      addSlots.push(["add-" + freq, freq, freq]);
+    for (const [cat, label] of CATEGORIES) {
+      const group = items.filter((c) => categoryOf(c) === cat);
+      if (!group.length) continue;
+      html += sectionHeadHtml(label, group.length + "件");
+      html += group.map((c) => pickerRowHtml(c)).join("");
     }
   }
+  html += `<div id="add-any"></div>`;
   wrap.innerHTML = html;
-  for (const [slotId, key, def] of addSlots) fillAddForm(document.getElementById(slotId), key, def);
+  fillAddForm(document.getElementById("add-any"), "any", "daily");
 }
 function renderHistory() {
   const now = new Date();
@@ -958,13 +939,14 @@ function render(options) {
   const versionEl = document.getElementById("appVersion");
   if (versionEl) versionEl.textContent = "v" + APP_VERSION;
   document.getElementById("apiNotice").classList.toggle("hidden", Boolean(API_URL));
-  const isToday = state.tab !== "history";
-  document.getElementById("view-today").classList.toggle("hidden", !isToday);
+  document.getElementById("view-today").classList.toggle("hidden", state.tab !== "today");
+  document.getElementById("view-picker").classList.toggle("hidden", state.tab !== "picker");
   document.getElementById("view-history").classList.toggle("hidden", state.tab !== "history");
-  if (isToday) { renderShare(); renderTodayDone(); renderPresets(); renderTargetPanel(); renderChoreSections(); }
+  if (state.tab === "today") { renderShare(); renderTodayDone(); renderPresets(); renderTargetPanel(); }
+  if (state.tab === "picker") renderPicker();
   if (state.tab === "history") renderHistory();
   document.querySelectorAll(".tab").forEach((b) => {
-    const active = b.dataset.tab === state.tab;
+    const active = b.dataset.tab === state.tab || (state.tab === "picker" && b.dataset.tab === "today");
     b.classList.toggle("active", active);
     b.setAttribute("aria-selected", active ? "true" : "false");
   });
@@ -976,12 +958,10 @@ document.addEventListener("click", async (e) => {
   if (e.target.id === "retryLoadButton") { window.location.reload(); return; }
   const tabBtn = e.target.closest(".tab");
   if (tabBtn) { state.tab = tabBtn.dataset.tab; render({ keepScroll: false }); return; }
-  const seg = e.target.closest(".seg-btn");
-  if (seg) {
-    state.groupMode = seg.dataset.mode;
-    render();
-    return;
-  }
+  if (e.target.id === "openPickerBtn") { state.tab = "picker"; render({ keepScroll: false }); return; }
+  if (e.target.id === "pickerDoneBtn") { state.tab = "today"; render({ keepScroll: false }); return; }
+  const pickerChip = e.target.closest(".picker-chip");
+  if (pickerChip) { state.pickerCat = pickerChip.dataset.cat; renderPicker(); return; }
   if (e.target.id === "presetCook" || e.target.id === "presetEatout") {
     const meal = e.target.id === "presetCook" ? "cook" : "eatout";
     state.presets.meal = state.presets.meal === meal ? null : meal;
@@ -1061,6 +1041,13 @@ document.addEventListener("click", async (e) => {
   }
 });
 
+document.addEventListener("input", (e) => {
+  if (e.target.id === "pickerSearch") {
+    state.pickerSearch = e.target.value;
+    renderPicker();
+  }
+});
+
 function validateChoreInput(name, freq, minutesRaw, steps, fallbackMinutes) {
   if (!name) return { error: "名前を入力してください" };
   if (name.length > 60) return { error: "名前は60文字以内で入力してください" };
@@ -1123,6 +1110,7 @@ document.addEventListener("submit", async (e) => {
 
 /* ---------- 起動・同期 ---------- */
 async function init() {
+  storageRemove("kaji_pin"); // v1.3で旧バージョンが端末に残した保存値を掃除する
   const now = new Date();
   state.calCursor = { y: now.getFullYear(), m: now.getMonth() };
   state.selectedDay = todayStr();

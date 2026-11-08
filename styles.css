@@ -166,6 +166,17 @@ main { padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16
   .notice, .error-bar, .undo-bar { margin-left: 12px; margin-right: 12px; }
 }
 
+/* ---------- タスク選択画面（v1.3） ---------- */
+.picker-open-btn { width: 100%; min-height: 56px; margin-top: 12px; border: 0; border-radius: 12px; background: var(--green); color: #fff; font-size: 17px; font-weight: 800; }
+.picker-note { font-size: 13px; color: var(--muted); margin: 0 0 6px; }
+.picker-search-label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
+.picker-search { width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 10px; font-size: 16px; background: #fff; }
+.picker-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.picker-row.selected { border-color: var(--green); background: #f2f9f3; }
+.toggle-btn { flex: 1; }
+.picker-foot { position: sticky; bottom: 10px; z-index: 5; display: flex; justify-content: space-between; align-items: center; gap: 12px; background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin-top: 14px; font-weight: 700; box-shadow: 0 2px 12px rgba(0,0,0,.10); }
+.picker-foot .primary-btn { flex: none; min-height: 48px; }
+
 .loading-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); }
 .loading-card .plain-btn { flex: none; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
