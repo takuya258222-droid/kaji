@@ -39,19 +39,28 @@
     <span id="loadingText">読み込み中…</span>
     <button id="retryLoadButton" class="plain-btn hidden" type="button">再読み込み</button>
   </div>
-  <!-- 今日（今日のタスク・今日やった家事・分担） -->
+  <!-- 今日（今日やること・家事一覧・今日やった家事・分担を1画面に） -->
   <section id="view-today" class="view">
     <div class="card target-card">
-      <h2>今日のタスク</h2>
-      <div class="preset-row">
-        <span class="preset-label">今日は：</span>
-        <button type="button" class="chip" id="presetCook" aria-pressed="false">自炊の日</button>
-        <button type="button" class="chip" id="presetEatout" aria-pressed="false">外食の日</button>
-        <button type="button" class="chip" id="presetLaundry" aria-pressed="false">洗濯する日</button>
-      </div>
+      <h2>今日やること</h2>
       <div id="target-daily"></div>
-      <button type="button" id="openPickerBtn" class="picker-open-btn">＋ タスクを選ぶ</button>
     </div>
+
+    <div class="card">
+      <h2>家事一覧</h2>
+      <p class="list-note">今日やる家事は、一覧の「＋ 選ぶ」を押すと上の「今日やること」に入ります。</p>
+      <label class="list-search-label" for="listSearch">家事を検索</label>
+      <input id="listSearch" class="list-search" type="search" placeholder="例：トイレ、洗濯、ゴミ" autocomplete="off">
+      <div class="list-chips" role="group" aria-label="項目で絞り込む">
+        <button type="button" class="chip list-chip on" data-cat="all" aria-pressed="true">すべて</button>
+        <button type="button" class="chip list-chip" data-cat="kitchen" aria-pressed="false">キッチン</button>
+        <button type="button" class="chip list-chip" data-cat="water" aria-pressed="false">水回り</button>
+        <button type="button" class="chip list-chip" data-cat="laundry" aria-pressed="false">洗濯</button>
+        <button type="button" class="chip list-chip" data-cat="living" aria-pressed="false">リビング・部屋</button>
+        <button type="button" class="chip list-chip" data-cat="other" aria-pressed="false">ゴミ・その他</button>
+      </div>
+    </div>
+    <div id="choreList"></div>
 
     <div class="card">
       <h2>今日やった家事</h2>
@@ -61,29 +70,6 @@
     <div class="card" id="shareCard">
       <h2>今月の分担</h2>
       <div id="shareBody"></div>
-    </div>
-  </section>
-
-  <!-- タスク選択（検索・項目別フィルタから今日のタスクを選ぶ） -->
-  <section id="view-picker" class="view hidden">
-    <div class="card">
-      <h2>タスクを選ぶ</h2>
-      <p class="picker-note">今日やる家事を選んでください。選んだものだけが「今日のタスク」に出ます。</p>
-      <label class="picker-search-label" for="pickerSearch">家事を検索</label>
-      <input id="pickerSearch" class="picker-search" type="search" placeholder="例：トイレ、洗濯、ゴミ" autocomplete="off">
-      <div class="picker-chips" role="group" aria-label="項目で絞り込む">
-        <button type="button" class="chip picker-chip on" data-cat="all" aria-pressed="true">すべて</button>
-        <button type="button" class="chip picker-chip" data-cat="kitchen" aria-pressed="false">キッチン</button>
-        <button type="button" class="chip picker-chip" data-cat="water" aria-pressed="false">水回り</button>
-        <button type="button" class="chip picker-chip" data-cat="laundry" aria-pressed="false">洗濯</button>
-        <button type="button" class="chip picker-chip" data-cat="living" aria-pressed="false">リビング・部屋</button>
-        <button type="button" class="chip picker-chip" data-cat="other" aria-pressed="false">ゴミ・その他</button>
-      </div>
-    </div>
-    <div id="pickerList"></div>
-    <div class="picker-foot">
-      <span id="pickerSummary">選択中 0件・合計約0分</span>
-      <button type="button" id="pickerDoneBtn" class="primary-btn">今日に戻る</button>
     </div>
   </section>
 
@@ -106,7 +92,7 @@
   </section>
 </main>
 
-<footer class="app-footer">家事アプリ <span id="appVersion">v1.3</span>｜記録は自動で保存され、あやと同期されます。</footer>
+<footer class="app-footer">家事アプリ <span id="appVersion">v1.4</span>｜記録は自動で保存され、あやと同期されます。</footer>
 
 <script src="./app.js"></script>
 </body>

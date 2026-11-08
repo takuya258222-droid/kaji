@@ -2,7 +2,7 @@
 
 // Apps Script ウェブアプリの URL（家事API v2）
 const API_URL = "https://script.google.com/macros/s/AKfycbx91iMFxq6gxpFuIsZR9Ok93ZZrH4DRrCWrRYhKuRk9QWLlpyX8YUDJKBdGaBXC-mi7ZA/exec";
-const APP_VERSION = "1.3";
+const APP_VERSION = "1.4";
 const STATE_CACHE_KEY = "kaji_state_cache_v1";
 const WRITE_QUEUE_KEY = "kaji_write_queue_v1";
 
@@ -14,9 +14,9 @@ function storageRemove(key) { try { window.localStorage.removeItem(key); } catch
 const WHO_LIST = ["卓也", "あや", "ふたりで"];
 const WHO_CLASS = { "卓也": "takuya", "あや": "aya", "ふたりで": "both" };
 const FREQ_LABEL = { daily: "毎日", weekly: "週1回", monthly: "月1回くらい" };
-// 対象リストは「今日のタスク」1つだけ（仕様訂正 2026-11-07）。週1回・月1回の家事も今日のタスクに入る
-const TARGET_LABEL = "今日のタスク";
-// 選択画面の項目別フィルタ用カテゴリ（スキーマは変えず、ID対応表＋名前キーワードで振り分ける）
+// 対象リストは「今日やること」1つだけ（仕様訂正 2026-11-07）。週1回・月1回の家事も今日やることに入る
+const TARGET_LABEL = "今日やること";
+// 家事一覧の項目別フィルタ用カテゴリ（スキーマは変えず、ID対応表＋名前キーワードで振り分ける）
 const CATEGORIES = [
   ["kitchen", "キッチン"],
   ["water", "水回り"],
@@ -52,13 +52,12 @@ const state = {
   chores: [],
   records: [], // {date, choreId, who}
   targets: [], // {scope, key, choreId}
-  tab: "today", // "today" | "picker" | "history"
+  tab: "today", // "today" | "history"
   openSteps: new Set(),
   editingId: null,
   addOpen: { any: false },
-  pickerSearch: "",
-  pickerCat: "all",
-  presets: { meal: null, laundry: false }, // meal: "cook"|"eatout"|null
+  listSearch: "",
+  listCat: "all",
   calCursor: null, // {y, m}
   selectedDay: null, // yyyy-MM-dd
   lastDeleted: null,
@@ -165,7 +164,6 @@ function updateTodayLabel() {
 function finishDateRollover(previous) {
   const current = todayStr();
   const wasSelectedToday = state.selectedDay === previous;
-  state.presets = { meal: null, laundry: false };
   if (wasSelectedToday) {
     state.selectedDay = current;
     const now = new Date();
@@ -680,31 +678,7 @@ function setTarget(choreId, on) {
     body: { action: "setTarget", scope, key, choreId, on }
   });
 }
-function applyPreset() {
-  const { meal, laundry } = state.presets;
-  const daily = activeChores("daily");
-  const want = new Set();
-  for (const c of daily) {
-    if (c.group === "everyday" || c.group === "stock" || !c.group) want.add(c.id);
-    if (meal === "cook" && c.group === "cook") want.add(c.id);
-    if (meal === "eatout" && c.group === "eatout") want.add(c.id);
-    if (laundry && c.group === "laundry") want.add(c.id);
-  }
-  const cur = targetSet();
-  const { scope, key } = targetKey();
-  for (const c of daily) {
-    const should = want.has(c.id);
-    if (should !== cur.has(c.id)) {
-      applyLocalTarget(c.id, should);
-      enqueueWrite({
-        key: "tgt|" + scope + "|" + key + "|" + c.id,
-        body: { action: "setTarget", scope, key, choreId: c.id, on: should }
-      });
-    }
-  }
-  persistStateCache();
-  render();
-}
+
 
 /* ---------- 描画 ---------- */
 function whoButtonsHtml(chore, todayWho) {
@@ -749,7 +723,7 @@ function renderTargetPanel() {
   // 頻度を問わず、今日の対象に選んだ全家事が対象（毎日／週1回／月1回すべて）
   const items = activeChores().filter((c) => set.has(c.id));
   if (!items.length) {
-    el.innerHTML = `<p class="empty-note">まだ選ばれていません。下の「＋ タスクを選ぶ」から、今日やる家事を選んでください（週1回・月1回の家事も選べます）。</p>`;
+    el.innerHTML = `<p class="empty-note">まだ選ばれていません。下の家事一覧から、今日やる家事を選んでね（週1回・月1回の家事も選べます）。</p>`;
     return;
   }
   const map = recordMap();
@@ -764,14 +738,14 @@ function renderTargetPanel() {
     return `<div class="target-row">
       <span class="name">${esc(c.name)}<span class="badge freq">${esc(FREQ_LABEL[c.freq] || "")}</span><span class="badge ${done ? "done" : "todo"}">${done ? "完了" : "未完了"}</span></span>
       <span class="who-row" style="margin:0;flex:1 1 200px">${whoButtonsHtml(c, todayWho)}</span>
-      <button type="button" class="mini-btn" data-act="untarget" data-id="${esc(c.id)}" aria-label="${esc(c.name)}を今日のタスクから外す">外す</button>
+      <button type="button" class="mini-btn" data-act="untarget" data-id="${esc(c.id)}" aria-label="${esc(c.name)}を今日やることから外す">外す</button>
     </div>`;
   }).join("");
   const pct = Math.round((doneCount / items.length) * 100);
   el.innerHTML = `<div class="target-meta">${TARGET_LABEL} ${items.length}件中 ${doneCount}件完了 ｜ 合計 約${totalMin}分（残り 約${restMin}分）</div>
     <div class="progress"><div style="width:${pct}%"></div></div>` + rows;
 }
-function pickerRowHtml(c) {
+function choreRowHtml(c) {
   const freq = c.freq;
   const t = todayStr();
   const todayWho = recordMap().get(t + "|" + c.id) || null;
@@ -797,7 +771,7 @@ function pickerRowHtml(c) {
         ${c.custom ? `<button type="button" class="danger-btn" data-act="del" data-id="${esc(c.id)}">この家事を削除</button>` : ""}</div></div>`;
     }
   }
-  return `<div class="chore picker-row ${inTarget ? "selected" : ""} ${rec ? "done" : ""}" data-card="${esc(c.id)}">
+  return `<div class="chore chore-row ${inTarget ? "selected" : ""} ${rec ? "done" : ""}" data-card="${esc(c.id)}">
     <div class="chore-top"><span class="chore-name">${esc(c.name)}</span>
       <span class="badge freq">${esc(FREQ_LABEL[freq] || "")}</span>
       <span class="chore-min">約${c.minutes || 10}分</span>
@@ -847,23 +821,18 @@ function fillAddForm(el, key, defaultFreq) {
     <p class="form-note">追加するとあやの画面にも表示されます。</p>
   </form>`;
 }
-// 選択画面：検索＋項目チップで絞り込み、カテゴリ別に見出し表示。各行のトグルで今日のタスクへ出し入れする
-function renderPicker() {
-  document.querySelectorAll(".picker-chip").forEach((b) => {
-    const active = b.dataset.cat === state.pickerCat;
+// 家事一覧：検索＋項目チップで絞り込み、カテゴリ別に見出し表示。各行のトグルで上の「今日やること」へ出し入れする
+function renderChoreList() {
+  document.querySelectorAll(".list-chip").forEach((b) => {
+    const active = b.dataset.cat === state.listCat;
     b.classList.toggle("on", active);
     b.setAttribute("aria-pressed", active ? "true" : "false");
   });
-  const set = targetSet();
-  const selected = activeChores().filter((c) => set.has(c.id));
-  const totalMin = selected.reduce((sum, c) => sum + (c.minutes || 0), 0);
-  const sumEl = document.getElementById("pickerSummary");
-  if (sumEl) sumEl.textContent = `選択中 ${selected.length}件・合計約${totalMin}分`;
-  const wrap = document.getElementById("pickerList");
+  const wrap = document.getElementById("choreList");
   if (!wrap) return;
-  const q = state.pickerSearch.trim();
+  const q = state.listSearch.trim();
   let items = activeChores();
-  if (state.pickerCat !== "all") items = items.filter((c) => categoryOf(c) === state.pickerCat);
+  if (state.listCat !== "all") items = items.filter((c) => categoryOf(c) === state.listCat);
   if (q) items = items.filter((c) => c.name.includes(q));
   let html = "";
   if (!items.length) {
@@ -873,7 +842,7 @@ function renderPicker() {
       const group = items.filter((c) => categoryOf(c) === cat);
       if (!group.length) continue;
       html += sectionHeadHtml(label, group.length + "件");
-      html += group.map((c) => pickerRowHtml(c)).join("");
+      html += group.map((c) => choreRowHtml(c)).join("");
     }
   }
   html += `<div id="add-any"></div>`;
@@ -921,17 +890,6 @@ function renderHistory() {
     }).join("");
   }
 }
-function renderPresets() {
-  const cook = document.getElementById("presetCook");
-  const eatout = document.getElementById("presetEatout");
-  const laundry = document.getElementById("presetLaundry");
-  cook.classList.toggle("on", state.presets.meal === "cook");
-  cook.setAttribute("aria-pressed", state.presets.meal === "cook" ? "true" : "false");
-  eatout.classList.toggle("on", state.presets.meal === "eatout");
-  eatout.setAttribute("aria-pressed", state.presets.meal === "eatout" ? "true" : "false");
-  laundry.classList.toggle("on", state.presets.laundry);
-  laundry.setAttribute("aria-pressed", state.presets.laundry ? "true" : "false");
-}
 function render(options) {
   const keepScroll = !options || options.keepScroll !== false;
   const scrollY = window.scrollY || 0;
@@ -940,13 +898,11 @@ function render(options) {
   if (versionEl) versionEl.textContent = "v" + APP_VERSION;
   document.getElementById("apiNotice").classList.toggle("hidden", Boolean(API_URL));
   document.getElementById("view-today").classList.toggle("hidden", state.tab !== "today");
-  document.getElementById("view-picker").classList.toggle("hidden", state.tab !== "picker");
   document.getElementById("view-history").classList.toggle("hidden", state.tab !== "history");
-  if (state.tab === "today") { renderShare(); renderTodayDone(); renderPresets(); renderTargetPanel(); }
-  if (state.tab === "picker") renderPicker();
+  if (state.tab === "today") { renderTargetPanel(); renderChoreList(); renderShare(); renderTodayDone(); }
   if (state.tab === "history") renderHistory();
   document.querySelectorAll(".tab").forEach((b) => {
-    const active = b.dataset.tab === state.tab || (state.tab === "picker" && b.dataset.tab === "today");
+    const active = b.dataset.tab === state.tab;
     b.classList.toggle("active", active);
     b.setAttribute("aria-selected", active ? "true" : "false");
   });
@@ -958,23 +914,8 @@ document.addEventListener("click", async (e) => {
   if (e.target.id === "retryLoadButton") { window.location.reload(); return; }
   const tabBtn = e.target.closest(".tab");
   if (tabBtn) { state.tab = tabBtn.dataset.tab; render({ keepScroll: false }); return; }
-  if (e.target.id === "openPickerBtn") { state.tab = "picker"; render({ keepScroll: false }); return; }
-  if (e.target.id === "pickerDoneBtn") { state.tab = "today"; render({ keepScroll: false }); return; }
-  const pickerChip = e.target.closest(".picker-chip");
-  if (pickerChip) { state.pickerCat = pickerChip.dataset.cat; renderPicker(); return; }
-  if (e.target.id === "presetCook" || e.target.id === "presetEatout") {
-    const meal = e.target.id === "presetCook" ? "cook" : "eatout";
-    state.presets.meal = state.presets.meal === meal ? null : meal;
-    renderPresets();
-    await applyPreset();
-    return;
-  }
-  if (e.target.id === "presetLaundry") {
-    state.presets.laundry = !state.presets.laundry;
-    renderPresets();
-    await applyPreset();
-    return;
-  }
+  const listChip = e.target.closest(".list-chip");
+  if (listChip) { state.listCat = listChip.dataset.cat; renderChoreList(); return; }
   if (e.target.id === "calPrev" || e.target.id === "calNext") {
     const c = state.calCursor;
     const d = new Date(c.y, c.m + (e.target.id === "calNext" ? 1 : -1), 1);
@@ -1042,9 +983,9 @@ document.addEventListener("click", async (e) => {
 });
 
 document.addEventListener("input", (e) => {
-  if (e.target.id === "pickerSearch") {
-    state.pickerSearch = e.target.value;
-    renderPicker();
+  if (e.target.id === "listSearch") {
+    state.listSearch = e.target.value;
+    renderChoreList();
   }
 });
 
